@@ -1,0 +1,42 @@
+# Compiled artifacts
+/target/
+**/target/
+
+# Rust/Cargo
+/Cargo.lock
+
+# Temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*~
+
+# macOS
+.DS_Store
+
+# Editor directories
+.vscode/
+.idea/
+
+# Python virtualenvs and caches (SDK)
+/sdk/python/.venv/
+/sdk/python/.venv/*
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Packaging/build
+/dist/
+/build/
+
+# Environment files
+.env
+.env.local
+
+# Misc
+/tmp/
+.copilot/
