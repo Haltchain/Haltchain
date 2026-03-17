@@ -1,0 +1,215 @@
+use chrono::Utc;
+use haltchain_signing::SignedEnvelope;
+use serde::{Deserialize, Serialize};
+
+//Request / response wire types
+
+#[derive(Debug, Deserialize)]
+pub struct ThresholdPatch {
+    pub key: String,
+    pub value: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateVariantReq {
+    pub name: String,
+    pub thresholds: std::collections::HashMap<String, f64>,
+    #[serde(default)]
+    pub agent_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReportIntentRequest {
+    pub agent_id: String,
+    pub goal: String,
+    #[serde(default)]
+    pub constraints: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IntentRecord {
+    pub agent_id: String,
+    pub goal: String,
+    pub constraints: serde_json::Value,
+    pub reported_at: chrono::DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RiskAdvisory {
+    pub id: i64,
+    pub source_agent_id: String,
+    pub target_agent_id: String,
+    pub policy_code: String,
+    pub reason: String,
+    pub trigger_transaction_id: String,
+    pub created_at: chrono::DateTime<Utc>,
+}
+
+pub(crate) fn default_apply_as_variant() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdjustmentRecommendation {
+    pub id: i64,
+    pub recommendation_key: String,
+    pub threshold_key: String,
+    pub current_threshold: f64,
+    pub proposed_threshold: f64,
+    pub sample_size: usize,
+    pub false_positive_count: usize,
+    pub true_positive_count: usize,
+    pub confidence: f64,
+    pub rationale: String,
+    pub status: String,
+    pub trigger_outcome_id: Option<i64>,
+    pub trigger_transaction_id: Option<String>,
+    pub decided_by: Option<String>,
+    pub decision_notes: Option<String>,
+    pub variant_id: Option<String>,
+    pub applied_adjustment_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LearningRunReport {
+    pub generated: usize,
+    pub considered_outcomes: usize,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ApproveRecommendationRequest {
+    pub reviewer_id: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+    #[serde(default)]
+    pub agent_ids: Vec<String>,
+    #[serde(default = "default_apply_as_variant")]
+    pub apply_as_variant: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RejectRecommendationRequest {
+    pub reviewer_id: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevertRecommendationRequest {
+    pub reviewer_id: String,
+    #[serde(default)]
+    pub notes: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ValidationRequest {
+    pub agent_id: String,
+    /// Kept for wire-format backward compatibility; auth uses X-API-Key header only.
+    #[serde(default)]
+    pub api_key: String,
+    pub action: ActionPayload,
+    /// Session ID for goal tracking.  Optional for backward compatibility.
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub metadata: serde_json::Value,
+}
+
+/// Flat action descriptor.
+#[derive(Debug, Deserialize)]
+pub struct ActionPayload {
+    #[serde(rename = "type")]
+    pub action_type: String,
+    pub amount: Option<f64>,
+    pub currency: Option<String>,
+    pub recipient: Option<String>,
+    pub endpoint: Option<String>,
+    pub method: Option<String>,
+    pub device_id: Option<String>,
+    pub command: Option<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Decision {
+    Allow,
+    Deny,
+    CircuitBreak,
+    GoalClarificationRequired,
+}
+
+impl Decision {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Decision::Allow => "ALLOW",
+            Decision::Deny => "DENY",
+            Decision::CircuitBreak => "CIRCUIT_BREAK",
+            Decision::GoalClarificationRequired => "GOAL_CLARIFICATION_REQUIRED",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum ScanTier {
+    Essential,
+    #[default]
+    Standard,
+    Maximum,
+}
+
+impl ScanTier {
+    pub fn from_header(s: &str) -> Self {
+        match s.trim() {
+            "Essential" => ScanTier::Essential,
+            "Maximum" => ScanTier::Maximum,
+            _ => ScanTier::Standard,
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+pub struct ValidationResponse {
+    pub decision: Decision,
+    pub transaction_id: String,
+    pub timestamp: String,
+    pub circuit_breaker_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
+    pub actions_this_minute: usize,
+    pub rate_limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deferred_scan_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capability_risk: Option<serde_json::Value>,
+    /// Ed25519 signed envelope — verify with `GET /public-key`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sig: Option<SignedEnvelope>,
+}
+
+/// Per-agent snapshot returned by `GET /status/:agent_id`.
+#[derive(Debug, Serialize)]
+pub struct AgentStatus {
+    pub agent_id: String,
+    pub circuit_breaker_active: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub circuit_breaker_reason: Option<String>,
+    pub actions_this_minute: usize,
+    pub rate_limit: usize,
+    pub ewma_velocity: f64,
+    pub anomaly_score: Option<f64>,
+}
+
+/// Drift status returned by `GET /drift/:agent_id/:session_id`.
+#[derive(Debug, Serialize)]
+pub struct DriftStatus {
+    pub agent_id: String,
+    pub session_id: String,
+    pub goal_intent: Option<String>,
+    pub window_mean: Option<f64>,
+    pub trend_slope: Option<f64>,
+    pub window_len: usize,
+    pub threshold: f64,
+    pub is_drifting: bool,
+}

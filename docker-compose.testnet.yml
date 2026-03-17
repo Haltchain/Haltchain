@@ -1,0 +1,134 @@
+# 3-node BFT local testnet — simulates AWS us-east / GCP eu-west / Azure asia regions
+# using isolated Docker networks to model cross-cloud topology.
+#
+# Start:  docker compose -f docker-compose.testnet.yml up
+# Tear:   docker compose -f docker-compose.testnet.yml down -v
+
+networks:
+  # Each "cloud" is a distinct bridge network.
+  net-us-east:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.1.0/24
+  net-eu-west:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.2.0/24
+  net-asia:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.3.0/24
+  # Shared backbone — all nodes can reach the HaltChain API on this network.
+  net-backbone:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.10.0.0/24
+
+services:
+  # ── API (shared target for all consensus nodes) ────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: haltchain-api:testnet
+    container_name: haltchain-testnet-api
+    ports:
+      - "8080:8080"
+    environment:
+      RUST_LOG: info
+      HALTCHAIN_TM_CHAIN_ID: haltchain-testnet
+      # node1@10.10.1.10:26656#us-east-1 — node2 and node3 are peers
+      HALTCHAIN_TM_VALIDATORS: "node1@10.10.1.10:26656#us-east-1,node2@10.10.2.10:26656#eu-west-1,node3@10.10.3.10:26656#ap-southeast-1"
+      HALTCHAIN_TM_MIN_VALIDATORS: "3"
+      HALTCHAIN_TM_MIN_REGIONS: "2"
+      # Merkle witness keys left empty — override with real Ed25519 keys for HSM
+      HALTCHAIN_MERKLE_WITNESS_THRESHOLD: "2"
+    networks:
+      net-backbone:
+        ipv4_address: 10.10.0.10
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q '\"status\":\"ok\"' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Raft Node 1  (simulated AWS us-east-1) ─────────────────────────────────
+  node1:
+    image: haltchain-api:testnet
+    container_name: haltchain-raft-node1
+    command: ["haltchain-node", "--node-id=1", "--peers=2,3"]
+    environment:
+      RUST_LOG: info
+      RAFT_NODE_ID: "1"
+      RAFT_PEERS: "2,3"
+      RAFT_STATE_DIR: /data/raft
+      HALTCHAIN_TM_CHAIN_ID: haltchain-testnet
+      CLOUD_REGION: us-east-1
+    volumes:
+      - raft-node1:/data/raft
+    networks:
+      net-us-east:
+        ipv4_address: 10.10.1.10
+      net-backbone:
+        ipv4_address: 10.10.0.11
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: on-failure
+
+  # ── Raft Node 2  (simulated GCP eu-west-1) ────────────────────────────────
+  node2:
+    image: haltchain-api:testnet
+    container_name: haltchain-raft-node2
+    command: ["haltchain-node", "--node-id=2", "--peers=1,3"]
+    environment:
+      RUST_LOG: info
+      RAFT_NODE_ID: "2"
+      RAFT_PEERS: "1,3"
+      RAFT_STATE_DIR: /data/raft
+      HALTCHAIN_TM_CHAIN_ID: haltchain-testnet
+      CLOUD_REGION: eu-west-1
+    volumes:
+      - raft-node2:/data/raft
+    networks:
+      net-eu-west:
+        ipv4_address: 10.10.2.10
+      net-backbone:
+        ipv4_address: 10.10.0.12
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: on-failure
+
+  # ── Raft Node 3  (simulated Azure ap-southeast-1) ─────────────────────────
+  node3:
+    image: haltchain-api:testnet
+    container_name: haltchain-raft-node3
+    command: ["haltchain-node", "--node-id=3", "--peers=1,2"]
+    environment:
+      RUST_LOG: info
+      RAFT_NODE_ID: "3"
+      RAFT_PEERS: "1,2"
+      RAFT_STATE_DIR: /data/raft
+      HALTCHAIN_TM_CHAIN_ID: haltchain-testnet
+      CLOUD_REGION: ap-southeast-1
+    volumes:
+      - raft-node3:/data/raft
+    networks:
+      net-asia:
+        ipv4_address: 10.10.3.10
+      net-backbone:
+        ipv4_address: 10.10.0.13
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: on-failure
+
+volumes:
+  raft-node1:
+  raft-node2:
+  raft-node3:

@@ -1,0 +1,30 @@
+[package]
+name = "haltchain-bench"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "bench"
+path = "src/main.rs"
+
+[[bin]]
+name = "saturation"
+path = "src/saturation.rs"
+
+[[bench]]
+name = "latency_critical"
+harness = false
+
+[dependencies]
+tokio           = { workspace = true }
+serde_json      = { workspace = true }
+chrono          = { workspace = true }
+haltchain-validator  = { path = "../validator" }
+haltchain-analytics  = { path = "../analytics" }
+haltchain-cache      = { path = "../cache" }
+haltchain-consensus  = { path = "../consensus" }
+haltchain-embeddings = { path = "../embeddings" }
+haltchain-policy     = { path = "../policy" }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }

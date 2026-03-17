@@ -1,0 +1,18 @@
+[package]
+name = "haltchain-rules"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde       = { workspace = true }
+serde_json  = { workspace = true }
+serde_yaml  = { workspace = true }
+thiserror   = { workspace = true }
+parking_lot = { workspace = true }
+notify      = { workspace = true }
+tracing     = { workspace = true }
+ed25519-dalek = { workspace = true }
+base64      = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

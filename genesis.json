@@ -1,0 +1,30 @@
+{
+  "chain_id": "haltchain-testnet",
+  "genesis_time": "2026-03-15T00:00:00Z",
+  "app_version": "0.1.0",
+  "validators": [
+    {
+      "node_id": "node1",
+      "pub_key_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "power": 10,
+      "region": "us-east-1"
+    },
+    {
+      "node_id": "node2",
+      "pub_key_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE=",
+      "power": 10,
+      "region": "eu-west-1"
+    },
+    {
+      "node_id": "node3",
+      "pub_key_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAI=",
+      "power": 10,
+      "region": "ap-southeast-1"
+    }
+  ],
+  "app_state": {
+    "quorum": { "size": 3, "threshold": 2 },
+    "high_stakes_threshold_cents": 50000,
+    "consensus_version": "raft-v1"
+  }
+}

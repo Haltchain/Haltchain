@@ -12,4 +12,34 @@ chrono            = { workspace = true }
 tracing           = { workspace = true }
 tracing-subscriber = { workspace = true }
 tower-http        = { workspace = true }
-haltchain-validator = { path = "../validator" }
+hmac              = { workspace = true }
+sha1              = { workspace = true }
+sha2              = { workspace = true }
+hex               = { workspace = true }
+parking_lot       = { workspace = true }
+base64            = { workspace = true }
+ed25519-dalek     = { workspace = true }
+dashmap           = { workspace = true }
+haltchain-validator  = { path = "../validator" }
+haltchain-cognitive  = { path = "../cognitive" }
+haltchain-capability = { path = "../capability" }
+haltchain-merkle     = { path = "../merkle" }
+haltchain-tendermint = { path = "../tendermint" }
+argon2               = { workspace = true }
+bcrypt               = { workspace = true }
+sqlx                 = { workspace = true }
+async-stream         = { workspace = true }
+futures-util         = { workspace = true }
+uuid                = { workspace = true }
+tokio-rustls        = { workspace = true }
+rustls              = { workspace = true }
+rustls-pemfile      = { workspace = true }
+hyper               = { workspace = true }
+hyper-util          = { workspace = true }
+jsonwebtoken        = { workspace = true }
+thiserror           = { workspace = true }
+tower               = "0.5"
+chacha20poly1305    = { workspace = true }
+rand_core           = { workspace = true }
+
+[dev-dependencies]

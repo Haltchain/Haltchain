@@ -1,0 +1,56 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: haltchain-frontend:dev
+    container_name: haltchain-frontend
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    depends_on:
+      - api
+    env_file:
+      - .env.docker
+    environment:
+      # These are overridden by .env.docker if present
+      HALTCHAIN_API_URL: http://api:8080
+      FRONTEND_PORT: 3000
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: haltchain-api:dev
+    container_name: haltchain-dev
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    depends_on:
+      - redis
+    env_file:
+      - .env.docker
+    environment:
+      # DATABASE_URL comes from .env.docker (Supabase). Do NOT override it here.
+      RUST_LOG: info
+      # HALTCHAIN_ADMIN_KEYS: defined in .env.docker (DO NOT COMMIT REAL KEYS)
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /health HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && grep -q '\"status\":\"ok\"' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: haltchain-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+
