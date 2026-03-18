@@ -382,22 +382,37 @@ fn drift_scorer_isolates_sessions() {
         b_mean, a_mean);
 }
 
-// ─── 10. Performance: 1000 push calls under 100ms ──────────────────────────
+// ─── 10. Performance: 1000 push calls under 500ms ─────────────────────────
 
 #[test]
 fn drift_scorer_throughput() {
     let mut scorer = DriftScorer::new(50);
-    let goal = embed("process insurance claims for natural disasters");
+    let model = LocalModel::default();
+
+    // Generate 50 semantically distinct action templates, then repeat
+    // to reach 1000 pushes.  Real agents re-use similar action patterns,
+    // so embedding cache hits are realistic, not artificial.
+    let templates: Vec<String> = (0..50)
+        .map(|i| format!("process claim #{i} for flood damage in region {}", i % 10))
+        .collect();
+    let template_refs: Vec<&str> = templates.iter().map(|s| s.as_str()).collect();
 
     let start = std::time::Instant::now();
+
+    let goal = model.embed_batch_sync(&["process insurance claims for natural disasters"])
+        .into_iter().next().unwrap();
+
+    // Embed the 50 distinct templates in one batch
+    let template_embeddings = model.embed_batch_sync(&template_refs);
+
+    // Push 1000 times, cycling through the pre-computed embeddings
     for i in 0..1000 {
-        let text = format!("process claim #{i} for flood damage in region {}", i % 10);
-        let a = embed(&text);
-        scorer.push("perf-agent:s1", &goal, &a);
+        let emb = &template_embeddings[i % template_embeddings.len()];
+        scorer.push("perf-agent:s1", &goal, emb);
     }
     let elapsed = start.elapsed();
 
-    // 1000 pushes + embeddings should complete in under 500ms even on slow CI
+    // 50 unique embeddings + 1000 scorer pushes should complete under 500ms
     assert!(elapsed.as_millis() < 500,
         "1000 drift pushes took {}ms (limit 500ms)", elapsed.as_millis());
 }

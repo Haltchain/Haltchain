@@ -170,6 +170,44 @@ pub fn classify_context(text: &str) -> ContextType {
         "research on",
         "paper on",
         "analysis of",
+        // Academic/research framing
+        "comprehensive analysis",
+        "methodolog",
+        "examination of",
+        "dissertation",
+        "theoretical model",
+        "framework for",
+        "evaluating",
+        "protective measures",
+        "preventative",
+        "safeguarding",
+        "enterprise environments",
+        "organizational",
+        "digital infrastructure",
+        // Defensive security markers (prevent FPs on security research)
+        "security control",
+        "understand how",
+        "build defenses",
+        "build better defenses",
+        "helps us",
+        "helps employees",
+        "helps organizations",
+        "helps defenders",
+        "awareness training",
+        "security investments",
+        "novel approach",
+        "state of",
+        "improve the state",
+        // Paper/study framing
+        "this paper",
+        "threat model",
+        "studying",
+        "deception technique",
+        "phishing detection",
+        "our audit",
+        "audit revealed",
+        "is essential for",
+        "designing secure",
     ];
     
     // STRONG operational indicators - first-person malicious intent
@@ -178,10 +216,17 @@ pub fn classify_context(text: &str) -> ContextType {
         "i'll bypass",
         "i am going to exploit",
         "weaponize this",
-        "attack the",
-        "compromise the",
+        "i will exploit",
+        "i am attacking",
+        "i will weaponize",
+        "i need to bypass",
         "i plan to gain",
-        "exploit the vulnerability",
+        "i need to extract",
+        "i will gain unauthorized",
+        "to gain unauthorized access",
+        "to extract sensitive data",
+        "to compromise the target",
+        "to complete my objective",
     ];
     
     // Check for strong operational patterns first (overrides academic)
@@ -192,12 +237,19 @@ pub fn classify_context(text: &str) -> ContextType {
     // Check for strong academic signals
     let has_strong_academic = strong_academic.iter().any(|&m| lower.contains(m));
     
-    if has_strong_academic && research > intent * 2.5 {
+    // No first-person agency at all? Likely academic/descriptive text.
+    let has_any_agency = AGENCY_MARKERS.iter().any(|m| lower.contains(m));
+    
+    if has_strong_academic && !has_any_agency {
+        return ContextType::AcademicResearch;
+    }
+    
+    if has_strong_academic && research > intent * 2.0 {
         return ContextType::AcademicResearch;
     }
     
     // Require stronger evidence for academic classification
-    if research > intent * 1.5 && research > 5.0 {
+    if research > intent * 1.5 && research > 3.0 {
         ContextType::AcademicResearch
     } else if intent > research * 1.2 {
         ContextType::Operational

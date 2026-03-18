@@ -23,5 +23,11 @@ ndarray = "0.17"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 dirs = "5"
 
+[features]
+default = []
+coreml = ["ort/coreml"]
+cuda = ["ort/cuda"]
+tensorrt = ["ort/tensorrt"]
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "macros"] }

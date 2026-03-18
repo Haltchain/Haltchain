@@ -9,6 +9,8 @@
 //! - L2 normalized output
 //! - Semantic similarity correlates with human judgment
 
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use ndarray::{Array1, Array2, IxDyn};
 use ort::session::Session;
 use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
@@ -20,6 +22,14 @@ use tokenizers::{PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, Tr
 
 use crate::model::cosine_similarity;
 
+// Re-export ep module for execution provider configuration
+#[cfg(feature = "coreml")]
+use ort::ep::CoreML;
+#[cfg(feature = "cuda")]
+use ort::ep::CUDA;
+#[cfg(feature = "tensorrt")]
+use ort::ep::TensorRT;
+
 /// Default model dimension for all-MiniLM-L6-v2.
 pub const DEFAULT_ONNX_DIMS: usize = 384;
 
@@ -28,13 +38,23 @@ const MODEL_URL_BASE: &str = "https://huggingface.co/sentence-transformers/all-M
 const ONNX_FILENAME: &str = "onnx/model.onnx";
 const TOKENIZER_FILENAME: &str = "tokenizer.json";
 
+/// Embedding cache capacity (number of unique texts to cache).
+const EMBED_CACHE_CAPACITY: usize = 4096;
+
 /// Semantic embedding model using ONNX Runtime.
+///
+/// Includes an embedding cache to avoid redundant inference for identical
+/// text inputs (common in detection pipelines and throughput scenarios).
 pub struct OnnxModel {
     session: Arc<Mutex<Session>>,
     tokenizer: Arc<Mutex<Tokenizer>>,
     dims: usize,
     /// Maximum tokenization length for truncation
     max_length: usize,
+    /// Embedding cache: text hash → embedding vector
+    cache: HashMap<u64, Vec<f64>>,
+    /// Insertion order for LRU eviction
+    cache_order: std::collections::VecDeque<u64>,
 }
 
 impl OnnxModel {
@@ -61,14 +81,43 @@ impl OnnxModel {
     }
 
     /// Load with explicit paths.
+    ///
+    /// Automatically registers GPU execution providers when compiled with
+    /// the corresponding feature flags (`coreml`, `cuda`, `tensorrt`).
+    /// Falls back to CPU if no GPU provider is available.
     pub fn load(model_path: &Path, tokenizer_path: &Path) -> Result<Self, OnnxError> {
-        // Build ONNX session - uses global environment
-        let session = SessionBuilder::new()
+        // Scale intra-op threads to available cores (capped at 8 to avoid overhead)
+        let num_threads = std::thread::available_parallelism()
+            .map(|n| n.get().min(8))
+            .unwrap_or(4);
+
+        let mut builder = SessionBuilder::new()
             .map_err(|e| OnnxError::SessionBuild(e.to_string()))?
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| OnnxError::SessionBuild(e.to_string()))?
-            .with_intra_threads(4)
-            .map_err(|e| OnnxError::SessionBuild(e.to_string()))?
+            .with_intra_threads(num_threads)
+            .map_err(|e| OnnxError::SessionBuild(e.to_string()))?;
+
+        // Register GPU execution providers (graceful fallback to CPU).
+        // Priority: TensorRT > CUDA > CoreML > CPU
+        #[allow(unused_mut)]
+        let mut eps = Vec::new();
+
+        #[cfg(feature = "tensorrt")]
+        eps.push(TensorRT::default().build());
+
+        #[cfg(feature = "cuda")]
+        eps.push(CUDA::default().build());
+
+        #[cfg(feature = "coreml")]
+        eps.push(CoreML::default().build());
+
+        if !eps.is_empty() {
+            builder = builder.with_execution_providers(eps)
+                .map_err(|e| OnnxError::SessionBuild(e.to_string()))?;
+        }
+
+        let session = builder
             .commit_from_file(model_path)
             .map_err(|e| OnnxError::ModelLoad(e.to_string()))?;
 
@@ -103,6 +152,8 @@ impl OnnxModel {
             tokenizer: Arc::new(Mutex::new(tokenizer)),
             dims: DEFAULT_ONNX_DIMS,
             max_length,
+            cache: HashMap::with_capacity(EMBED_CACHE_CAPACITY),
+            cache_order: std::collections::VecDeque::with_capacity(EMBED_CACHE_CAPACITY),
         })
     }
 
@@ -163,13 +214,111 @@ impl OnnxModel {
         Ok(())
     }
 
-    /// Embed a single text string.
-    pub fn embed_text(&self, text: &str) -> Vec<f64> {
-        self.embed_batch(&[text]).into_iter().next().unwrap_or_default()
+    /// Embed a single text string with caching.
+    ///
+    /// Checks the embedding cache first to avoid redundant ONNX inference.
+    /// Cache is bounded to [`EMBED_CACHE_CAPACITY`] entries with LRU eviction.
+    pub fn embed_text(&mut self, text: &str) -> Vec<f64> {
+        let key = Self::hash_text(text);
+        
+        // Cache hit — return clone
+        if let Some(cached) = self.cache.get(&key) {
+            return cached.clone();
+        }
+        
+        // Cache miss — compute embedding
+        let embedding = self.embed_batch_uncached(&[text])
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+        
+        // Insert into cache with LRU eviction
+        if self.cache_order.len() >= EMBED_CACHE_CAPACITY {
+            if let Some(old_key) = self.cache_order.pop_front() {
+                self.cache.remove(&old_key);
+            }
+        }
+        self.cache.insert(key, embedding.clone());
+        self.cache_order.push_back(key);
+        
+        embedding
+    }
+    
+    fn hash_text(text: &str) -> u64 {
+        let mut hasher = std::hash::DefaultHasher::new();
+        text.hash(&mut hasher);
+        hasher.finish()
     }
 
-    /// Embed multiple texts in a batch (more efficient).
-    pub fn embed_batch(&self, texts: &[&str]) -> Vec<Vec<f64>> {
+    /// Embed multiple texts in a batch (more efficient, no caching).
+    pub fn embed_batch(&mut self, texts: &[&str]) -> Vec<Vec<f64>> {
+        // For batch, check cache per-text and only run inference on misses
+        if texts.is_empty() {
+            return Vec::new();
+        }
+        
+        let mut results = vec![None; texts.len()];
+        let mut miss_indices = Vec::new();
+        let mut miss_texts = Vec::new();
+        
+        for (i, text) in texts.iter().enumerate() {
+            let key = Self::hash_text(text);
+            if let Some(cached) = self.cache.get(&key) {
+                results[i] = Some(cached.clone());
+            } else {
+                miss_indices.push(i);
+                miss_texts.push(*text);
+            }
+        }
+        
+        // Run inference only on cache misses
+        if !miss_texts.is_empty() {
+            let miss_refs: Vec<&str> = miss_texts.iter().map(|s| *s).collect();
+            let computed = self.embed_batch_uncached(&miss_refs);
+            for (j, embedding) in computed.into_iter().enumerate() {
+                let idx = miss_indices[j];
+                let key = Self::hash_text(texts[idx]);
+                // Cache the result
+                if self.cache_order.len() >= EMBED_CACHE_CAPACITY {
+                    if let Some(old_key) = self.cache_order.pop_front() {
+                        self.cache.remove(&old_key);
+                    }
+                }
+                self.cache.insert(key, embedding.clone());
+                self.cache_order.push_back(key);
+                results[idx] = Some(embedding);
+            }
+        }
+        
+        results.into_iter().map(|r| r.unwrap_or_else(|| vec![0.0; self.dims])).collect()
+    }
+
+    /// Raw ONNX inference without cache. Used internally.
+    ///
+    /// Automatically sub-batches large inputs into chunks for optimal
+    /// throughput (avoids creating oversized tensors).
+    fn embed_batch_uncached(&self, texts: &[&str]) -> Vec<Vec<f64>> {
+        if texts.is_empty() {
+            return Vec::new();
+        }
+
+        // Sub-batch for better throughput — moderate batch sizes
+        // balance padding overhead vs call overhead. 128 provides
+        // good parallelism without excessive padding waste.
+        const SUB_BATCH: usize = 128;
+        if texts.len() > SUB_BATCH {
+            let mut all_embeddings = Vec::with_capacity(texts.len());
+            for chunk in texts.chunks(SUB_BATCH) {
+                all_embeddings.extend(self.embed_batch_single(chunk));
+            }
+            return all_embeddings;
+        }
+
+        self.embed_batch_single(texts)
+    }
+
+    /// Single-batch ONNX inference (no chunking).
+    fn embed_batch_single(&self, texts: &[&str]) -> Vec<Vec<f64>> {
         if texts.is_empty() {
             return Vec::new();
         }
@@ -298,7 +447,7 @@ impl OnnxModel {
     }
 
     /// Compute semantic similarity between two texts.
-    pub fn similarity(&self, text1: &str, text2: &str) -> f64 {
+    pub fn similarity(&mut self, text1: &str, text2: &str) -> f64 {
         let emb1 = self.embed_text(text1);
         let emb2 = self.embed_text(text2);
         cosine_similarity(&emb1, &emb2)
@@ -341,7 +490,7 @@ mod tests {
 
     #[test]
     fn semantic_similarity_paraphrases() {
-        let Some(model) = get_test_model() else {
+        let Some(mut model) = get_test_model() else {
             eprintln!("Skipping test: ONNX model not available");
             return;
         };
@@ -360,7 +509,7 @@ mod tests {
 
     #[test]
     fn semantic_dissimilarity_unrelated() {
-        let Some(model) = get_test_model() else {
+        let Some(mut model) = get_test_model() else {
             eprintln!("Skipping test: ONNX model not available");
             return;
         };
@@ -379,7 +528,7 @@ mod tests {
 
     #[test]
     fn embedding_stable() {
-        let Some(model) = get_test_model() else {
+        let Some(mut model) = get_test_model() else {
             eprintln!("Skipping test: ONNX model not available");
             return;
         };
@@ -393,7 +542,7 @@ mod tests {
 
     #[test]
     fn embedding_normalized() {
-        let Some(model) = get_test_model() else {
+        let Some(mut model) = get_test_model() else {
             eprintln!("Skipping test: ONNX model not available");
             return;
         };

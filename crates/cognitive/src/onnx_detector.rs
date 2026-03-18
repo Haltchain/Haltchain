@@ -306,12 +306,27 @@ impl OnnxDetector {
         
         // AC-05 FIX: Use unified AlertTier with proper mapping
         // Old Review -> Medium, Old Normal -> None
-        let tier = if pattern_confidence > 0.85 || (pattern_confidence > 0.70 && percentile >= 95.0) {
+        // Context-aware thresholds: academic text requires stronger signal
+        let (crit_pat, med_pat, crit_cal, med_cal) = match context {
+            ContextType::AcademicResearch => (0.96, 0.90, 99.0, 97.0),
+            ContextType::Mixed => (0.88, 0.75, 97.0, 93.0),
+            ContextType::Operational => (0.85, 0.70, 95.0, 90.0),
+        };
+        // Anomaly-first: very high percentile (>99.5) indicates statistical outlier
+        // regardless of pattern confidence — this catches adversarial paraphrases
+        // that evade seed vocabulary but are still anomalous vs the benign distribution.
+        // Anomaly-first: for non-academic text (no strong research/defensive markers),
+        // a very high percentile indicates a statistical outlier that should be flagged.
+        // This catches adversarial paraphrases that evade seed vocabulary but are
+        // anomalous vs the benign distribution. Academic context is protected.
+        let tier = if pattern_confidence > crit_pat || (pattern_confidence > (crit_pat - 0.15) && percentile >= crit_cal) {
             AlertTier::Critical
-        } else if pattern_confidence > 0.70 || (pattern_confidence > 0.55 && percentile >= 90.0) {
-            AlertTier::Medium  // Maps from old AlertTier::Review
+        } else if percentile >= 99.5 && !matches!(context, ContextType::AcademicResearch) {
+            AlertTier::Medium
+        } else if pattern_confidence > med_pat || (pattern_confidence > (med_pat - 0.15) && percentile >= med_cal) {
+            AlertTier::Medium
         } else {
-            AlertTier::None  // Maps from old AlertTier::Normal
+            AlertTier::None
         };
         
         // Combined confidence weights pattern match more heavily when uncalibrated

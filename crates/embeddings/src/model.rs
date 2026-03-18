@@ -56,28 +56,44 @@ pub const LOCAL_DIMS: usize = DEFAULT_ONNX_DIMS;
 /// 
 /// Uses all-MiniLM-L6-v2 (22MB, 384-dim) for high-quality semantic embeddings.
 /// This is the PRIMARY model for production use against rogue AGI.
+/// 
+/// Internally caches the ONNX model as a singleton to avoid repeated disk loads
+/// when multiple instances are created (e.g., in test helpers).
 pub struct LocalModel {
     onnx: Arc<Mutex<OnnxModel>>,
 }
 
+/// Global cache for the ONNX model to avoid repeated disk loads.
+static ONNX_SINGLETON: std::sync::OnceLock<Arc<Mutex<OnnxModel>>> = std::sync::OnceLock::new();
+
 impl LocalModel {
     /// Load from cache directory.
     /// 
-    /// Cache dir: `~/.cache/haltchain/models/`, `~/Library/Caches/haltchain/models/` (macOS), or `./models/`
+    /// Uses a process-wide singleton to avoid repeated disk loads when
+    /// multiple LocalModel instances are created (common in test helpers).
     pub fn new() -> Result<Self, EmbedError> {
-        // Try multiple cache locations (cross-platform)
+        // Fast path: reuse cached model
+        if let Some(cached) = ONNX_SINGLETON.get() {
+            return Ok(Self { onnx: cached.clone() });
+        }
+        
+        // Slow path: load from disk and cache
+        let onnx = Self::load_from_disk()?;
+        let shared = Arc::new(Mutex::new(onnx));
+        // If another thread raced us, use theirs instead
+        let shared = ONNX_SINGLETON.get_or_init(|| shared.clone()).clone();
+        Ok(Self { onnx: shared })
+    }
+    
+    fn load_from_disk() -> Result<OnnxModel, EmbedError> {
         let mut cache_dirs: Vec<Option<PathBuf>> = vec![
-            // Linux: ~/.cache/
             dirs::home_dir().map(|d| d.join(".cache").join("haltchain").join("models")),
-            // macOS: ~/Library/Caches/
             dirs::cache_dir().map(|d| d.join("haltchain").join("models")),
-            // Local paths
             Some(PathBuf::from("./models")),
             Some(PathBuf::from("../models")),
             Some(PathBuf::from("../../models")),
         ];
 
-        // Also check if HALTCHAIN_MODEL_DIR env var is set
         if let Ok(env_dir) = std::env::var("HALTCHAIN_MODEL_DIR") {
             cache_dirs.insert(0, Some(PathBuf::from(env_dir)));
         }
@@ -85,16 +101,13 @@ impl LocalModel {
         for dir in &cache_dirs {
             if let Some(dir) = dir {
                 if dir.exists() {
-                    if let Ok(onnx) = OnnxModel::from_dir(&dir) {
-                        return Ok(Self {
-                            onnx: Arc::new(Mutex::new(onnx)),
-                        });
+                    if let Ok(onnx) = OnnxModel::from_dir(dir) {
+                        return Ok(onnx);
                     }
                 }
             }
         }
 
-        // Print debug info
         eprintln!("ONNX model not found. Searched in:");
         for dir in &cache_dirs {
             if let Some(d) = dir {
@@ -125,6 +138,14 @@ impl LocalModel {
     /// Embed a single text (synchronous for convenience).
     pub fn embed_text(&self, text: &str) -> Vec<f64> {
         self.onnx.lock().embed_text(text)
+    }
+
+    /// Embed multiple texts synchronously in a single batch.
+    ///
+    /// Much more efficient than calling `embed_text` in a loop because
+    /// ONNX Runtime can parallelise across the batch dimension.
+    pub fn embed_batch_sync(&self, texts: &[&str]) -> Vec<Vec<f64>> {
+        self.onnx.lock().embed_batch(texts)
     }
 
     /// Compute semantic similarity.

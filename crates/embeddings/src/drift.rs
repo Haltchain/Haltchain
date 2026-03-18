@@ -15,6 +15,9 @@ pub const DEFAULT_WINDOW: usize = 20;
 pub struct DriftWindow {
     scores: VecDeque<f64>,
     capacity: usize,
+    // Running centroid of action embeddings for consistency checking
+    action_sum: Vec<f64>,
+    action_count: usize,
 }
 
 impl DriftWindow {
@@ -22,6 +25,8 @@ impl DriftWindow {
         Self {
             scores: VecDeque::with_capacity(capacity),
             capacity,
+            action_sum: Vec::new(),
+            action_count: 0,
         }
     }
 
@@ -30,6 +35,28 @@ impl DriftWindow {
             self.scores.pop_front();
         }
         self.scores.push_back(score);
+    }
+    
+    /// Track action embedding for centroid consistency
+    pub fn track_action(&mut self, action: &[f64]) {
+        if self.action_sum.is_empty() {
+            self.action_sum = vec![0.0; action.len()];
+        }
+        for (s, a) in self.action_sum.iter_mut().zip(action.iter()) {
+            *s += a;
+        }
+        self.action_count += 1;
+    }
+    
+    /// Cosine similarity between an action and the session's running centroid.
+    /// Returns 1.0 if no centroid available yet.
+    pub fn centroid_similarity(&self, action: &[f64]) -> f64 {
+        if self.action_count == 0 || self.action_sum.is_empty() {
+            return 1.0;
+        }
+        let n = self.action_count as f64;
+        let centroid: Vec<f64> = self.action_sum.iter().map(|s| s / n).collect();
+        cosine_similarity(&centroid, action)
     }
 
     pub fn len(&self) -> usize {
@@ -98,12 +125,29 @@ impl DriftScorer {
 
     /// Score an action against a goal and update the window.
     /// `session_key` is typically `"{agent_id}:{session_id}"`.
+    /// 
+    /// The score blends goal-alignment (cosine similarity to goal) with
+    /// a consistency factor from the session's intra-action centroid.
+    /// This penalizes actions that are topically close to the goal
+    /// but intent-divergent (e.g., warehouse theft vs warehouse management).
     pub fn push(&mut self, session_key: &str, goal: &[f64], action: &[f64]) -> DriftResult {
-        let sim = cosine_similarity(goal, action);
+        let goal_sim = cosine_similarity(goal, action);
         let w = self
             .windows
             .entry(session_key.to_string())
             .or_insert_with(|| DriftWindow::new(self.window_size));
+        
+        // Blend goal similarity with action-centroid consistency
+        // This catches topic-adjacent but intent-divergent actions
+        let centroid_sim = w.centroid_similarity(action);
+        let sim = if w.action_count >= 2 {
+            // After enough actions, weight by consistency
+            goal_sim * 0.6 + centroid_sim * 0.4
+        } else {
+            goal_sim
+        };
+        
+        w.track_action(action);
         w.push(sim);
         DriftResult {
             similarity: sim,
