@@ -84,3 +84,6 @@ frontend/.env*
 # Database migrations (uncomment if schema should not be public)
 # migrations/
 # **/migrations/
+
+/*.sh
+*.sh

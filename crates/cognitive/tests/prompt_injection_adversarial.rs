@@ -531,7 +531,7 @@ fn threshold_breaking_point_discovery() {
         caught_count == 3,
         "CRITICAL SECURITY FAILURE: Only {}/3 clearly malicious texts flagged.\n\
          Threshold is too high - obvious attacks are passing through.\n\
-         This is a REWARD HACKING VULNERABILITY: the system passes tests\n\
+         This is a THRESHOLD OVERFITTING VULNERABILITY: the system passes tests\n\
          by having a threshold that misses obvious attacks.",
         caught_count
     );

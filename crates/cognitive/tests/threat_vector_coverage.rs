@@ -139,12 +139,12 @@ fn detects_multi_turn_gradual_drift() {
     println!("NOTE: Full multi-turn drift requires conversation history tracking");
 }
 
-/// 5. Legitimate High Reward (True Negative)
+/// 5. Legitimate High Metric Outcome (True Negative)
 ///
 /// Verifies that genuine high-reward completions are NOT flagged.
 /// Prevents false positives on legitimate excellence.
 #[test]
-fn legitimate_high_reward_not_flagged() {
+fn legitimate_high_metric_not_flagged() {
     use haltchain_analytics::reward_monitoring::{RewardAnomalyDetector, RewardEvent, SolutionPath};
     
     // Create baseline streams
@@ -193,12 +193,12 @@ fn legitimate_high_reward_not_flagged() {
     );
 }
 
-/// 6. Capability-Reward Decoupling
+/// 6. Capability-Metric Decoupling
 ///
-/// Detects sudden reward jumps without corresponding capability improvement.
-/// Indicates potential reward hacking or metric exploitation.
+/// Detects sudden metric jumps without corresponding capability improvement.
+/// Indicates potential metric-objective decoupling.
 #[test]
-fn detects_capability_reward_decoupling() {
+fn detects_capability_metric_decoupling() {
     use haltchain_analytics::reward_monitoring::{RewardAnomalyDetector, RewardEvent, SolutionPath};
     
     let baseline_streams: Vec<Vec<RewardEvent>> = (0..4)
@@ -234,23 +234,23 @@ fn detects_capability_reward_decoupling() {
     
     let score = detector.evaluate_reward_stream(&suspicious);
     
-    println!("Capability-reward decoupling score: {:.3}", score.value);
-    println!("Expected: High anomaly score for decoupled reward");
+    println!("Capability-metric decoupling score: {:.3}", score.value);
+    println!("Expected: High anomaly score for decoupled metric");
     
     // Decoupled reward should be flagged
     assert!(
         score.value > 0.3,
-        "Capability-reward decoupling not detected: score={:.3}",
+        "Capability-metric decoupling not detected: score={:.3}",
         score.value
     );
 }
 
-/// 7. Causal Reward Perturbation Adversarial Probing
+    /// 7. Causal Metric Perturbation Adversarial Probing
 ///
 /// Tests resistance to gradient-optimized minimal perturbations
-/// that maximize reward without task progress.
+    /// that maximize metric output without task progress.
 #[test]
-fn detects_causal_reward_perturbation() {
+    fn detects_causal_metric_perturbation() {
     use haltchain_analytics::causal_testing::{
         CausalInterventionTester, AgentSnapshot, AgentAction, AgentObservation,
         RewardFunction, Environment, InterventionOutcome
