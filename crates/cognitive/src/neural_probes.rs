@@ -191,9 +191,14 @@ impl TrajectoryAnalyzer {
             // κ = ||v1 × v2|| / ||v1||³
             let velocity = Self::vector_norm(&v1);
             let curvature = if velocity > 1e-10 {
-                let cross_product = Self::vector_norm(&v1) * Self::vector_norm(&v2) * 
-                    Self::angle_between(&v1, &v2).sin();
-                cross_product / velocity.powi(3)
+                let norm_v2 = Self::vector_norm(&v2);
+                let angle = Self::angle_between(&v1, &v2);
+                if velocity.is_nan() || norm_v2.is_nan() || angle.is_nan() {
+                    0.0
+                } else {
+                    let cross_product = velocity * norm_v2 * angle.sin();
+                    cross_product / velocity.powi(3)
+                }
             } else {
                 0.0
             };

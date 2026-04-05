@@ -19,7 +19,7 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+// Helpers 
 
 fn make_request(agent_id: &str, action_type: &str, amount: f64) -> ValidationRequest {
     ValidationRequest {
@@ -66,7 +66,7 @@ fn hash_embed(text: &str, dims: usize) -> Vec<f64> {
     v
 }
 
-// ─── Benchmark groups ─────────────────────────────────────────────────────────
+// ─── Benchmark groups 
 
 fn cache_hit_bench(c: &mut Criterion) {
     let cache = DecisionCache::new();
@@ -78,7 +78,8 @@ fn cache_hit_bench(c: &mut Criterion) {
             circuit_breaker_active: false,
             reason: None,
             policy: None,
-        },
+            rate_limit: 0,
+       },
     );
 
     let mut group = c.benchmark_group("cache");

@@ -16,6 +16,9 @@ use thiserror::Error;
 // Import ONNX model
 pub use crate::onnx_model::{OnnxError, OnnxModel, DEFAULT_ONNX_DIMS};
 
+#[cfg(feature = "redis-cache")]
+use crate::redis_cache::RedisEmbeddingCache;
+
 // ─── Error ────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Error)]
@@ -61,20 +64,36 @@ pub const LOCAL_DIMS: usize = DEFAULT_ONNX_DIMS;
 /// when multiple instances are created (e.g., in test helpers).
 pub struct LocalModel {
     onnx: Arc<Mutex<OnnxModel>>,
+    #[cfg(feature = "redis-cache")]
+    redis: Option<Arc<Mutex<RedisEmbeddingCache>>>,
 }
 
 /// Global cache for the ONNX model to avoid repeated disk loads.
 static ONNX_SINGLETON: std::sync::OnceLock<Arc<Mutex<OnnxModel>>> = std::sync::OnceLock::new();
+
+/// Global cache for Redis connection (shared across LocalModel instances).
+#[cfg(feature = "redis-cache")]
+static REDIS_SINGLETON: std::sync::OnceLock<Option<Arc<Mutex<RedisEmbeddingCache>>>> =
+    std::sync::OnceLock::new();
 
 impl LocalModel {
     /// Load from cache directory.
     /// 
     /// Uses a process-wide singleton to avoid repeated disk loads when
     /// multiple LocalModel instances are created (common in test helpers).
+    /// 
+    /// When compiled with `redis-cache`, automatically connects to Redis
+    /// for L2 embedding cache (env: `HALTCHAIN_REDIS_URL` or `REDIS_URL`,
+    /// defaults to `redis://127.0.0.1:6379`). Gracefully degrades if
+    /// Redis is unavailable.
     pub fn new() -> Result<Self, EmbedError> {
         // Fast path: reuse cached model
         if let Some(cached) = ONNX_SINGLETON.get() {
-            return Ok(Self { onnx: cached.clone() });
+            return Ok(Self {
+                onnx: cached.clone(),
+                #[cfg(feature = "redis-cache")]
+                redis: Self::get_redis(),
+            });
         }
         
         // Slow path: load from disk and cache
@@ -82,11 +101,19 @@ impl LocalModel {
         let shared = Arc::new(Mutex::new(onnx));
         // If another thread raced us, use theirs instead
         let shared = ONNX_SINGLETON.get_or_init(|| shared.clone()).clone();
-        Ok(Self { onnx: shared })
+        Ok(Self {
+            onnx: shared,
+            #[cfg(feature = "redis-cache")]
+            redis: Self::get_redis(),
+        })
     }
     
     fn load_from_disk() -> Result<OnnxModel, EmbedError> {
         let mut cache_dirs: Vec<Option<PathBuf>> = vec![
+            // Prefer INT8 quantized models for lower latency
+            dirs::home_dir().map(|d| d.join(".cache").join("haltchain").join("models_int8")),
+            dirs::cache_dir().map(|d| d.join("haltchain").join("models_int8")),
+            // Fall back to FP32 models
             dirs::home_dir().map(|d| d.join(".cache").join("haltchain").join("models")),
             dirs::cache_dir().map(|d| d.join("haltchain").join("models")),
             Some(PathBuf::from("./models")),
@@ -122,11 +149,22 @@ impl LocalModel {
         )))
     }
 
+    #[cfg(feature = "redis-cache")]
+    fn get_redis() -> Option<Arc<Mutex<RedisEmbeddingCache>>> {
+        REDIS_SINGLETON
+            .get_or_init(|| {
+                RedisEmbeddingCache::connect().map(|r| Arc::new(Mutex::new(r)))
+            })
+            .clone()
+    }
+
     /// Load from specific directory.
     pub fn from_dir(path: impl Into<PathBuf>) -> Result<Self, EmbedError> {
         let onnx = OnnxModel::from_dir(path.into())?;
         Ok(Self {
             onnx: Arc::new(Mutex::new(onnx)),
+            #[cfg(feature = "redis-cache")]
+            redis: Self::get_redis(),
         })
     }
 
@@ -136,7 +174,26 @@ impl LocalModel {
     }
 
     /// Embed a single text (synchronous for convenience).
+    ///
+    /// Cache hierarchy: L1 (in-process) → L2 (Redis, if enabled) → ONNX inference.
     pub fn embed_text(&self, text: &str) -> Vec<f64> {
+        #[cfg(feature = "redis-cache")]
+        {
+            let hash = OnnxModel::hash_text(text);
+            // Check Redis L2 before taking the ONNX lock
+            if let Some(redis) = &self.redis {
+                if let Some(cached) = redis.lock().get(hash) {
+                    return cached;
+                }
+            }
+            let embedding = self.onnx.lock().embed_text(text);
+            // Write-through to Redis
+            if let Some(redis) = &self.redis {
+                redis.lock().put(hash, &embedding);
+            }
+            return embedding;
+        }
+        #[cfg(not(feature = "redis-cache"))]
         self.onnx.lock().embed_text(text)
     }
 
@@ -144,7 +201,58 @@ impl LocalModel {
     ///
     /// Much more efficient than calling `embed_text` in a loop because
     /// ONNX Runtime can parallelise across the batch dimension.
+    /// When Redis L2 is enabled, batch-checks Redis for misses before inference.
     pub fn embed_batch_sync(&self, texts: &[&str]) -> Vec<Vec<f64>> {
+        #[cfg(feature = "redis-cache")]
+        {
+            if let Some(redis) = &self.redis {
+                let hashes: Vec<u64> = texts.iter().map(|t| OnnxModel::hash_text(t)).collect();
+                let redis_hits = redis.lock().get_batch(&hashes);
+
+                // If all found in Redis, skip ONNX entirely
+                if redis_hits.len() == texts.len() {
+                    let mut results = vec![Vec::new(); texts.len()];
+                    for (idx, emb) in redis_hits {
+                        results[idx] = emb;
+                    }
+                    return results;
+                }
+
+                // Partial hits — compute misses via ONNX
+                let hit_set: std::collections::HashSet<usize> =
+                    redis_hits.iter().map(|(i, _)| *i).collect();
+                let miss_texts: Vec<&str> = texts
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| !hit_set.contains(i))
+                    .map(|(_, t)| *t)
+                    .collect();
+                let miss_indices: Vec<usize> = (0..texts.len())
+                    .filter(|i| !hit_set.contains(i))
+                    .collect();
+
+                let computed = self.onnx.lock().embed_batch(&miss_texts);
+
+                // Assemble results
+                let mut results = vec![Vec::new(); texts.len()];
+                for (idx, emb) in redis_hits {
+                    results[idx] = emb;
+                }
+                for (j, emb) in computed.into_iter().enumerate() {
+                    let idx = miss_indices[j];
+                    results[idx] = emb;
+                }
+                // Write-through misses to Redis
+                let puts: Vec<(u64, &[f64])> = miss_indices
+                    .iter()
+                    .map(|&idx| (hashes[idx], results[idx].as_slice()))
+                    .collect();
+                if !puts.is_empty() {
+                    redis.lock().put_batch(&puts);
+                }
+                return results;
+            }
+        }
         self.onnx.lock().embed_batch(texts)
     }
 
@@ -336,14 +444,14 @@ impl ModelKind {
     }
 
     /// Synchronous embed for local models (LocalModel and HashModel).
-    /// Panics if called on RemoteModel.
+    /// Returns zero vector with error log if called on RemoteModel.
     pub fn embed_text(&self, text: &str) -> Vec<f64> {
         match self {
             ModelKind::Local(m) => m.embed_text(text),
             ModelKind::Hash(m) => m.embed_text(text),
-            ModelKind::Remote(_) => {
-                panic!("embed_text is synchronous and cannot be used with RemoteModel. \
-                       Use embed_one().await instead.")
+            ModelKind::Remote(m) => {
+                tracing::error!("embed_text is synchronous and cannot be used with RemoteModel; returning zero vector");
+                vec![0.0; m.dims()]
             }
         }
     }

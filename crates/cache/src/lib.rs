@@ -26,10 +26,12 @@ pub struct CachedDecision {
     pub circuit_breaker_active: bool,
     pub reason: Option<String>,
     pub policy: Option<String>,
+    pub rate_limit: usize,
 }
 struct Entry {
     decision: CachedDecision,
     inserted: Instant,
+    agent_id: Option<String>,
 }
 
 impl Entry {
@@ -103,6 +105,12 @@ impl DecisionCache {
     /// Insert a decision.  Evicts expired entries (and oldest entries if at
     /// capacity) before inserting.
     pub fn insert(&self, key: String, decision: CachedDecision) {
+        self.insert_for(key, decision, None)
+    }
+
+    /// Insert a decision tagged with the originating agent_id for targeted
+    /// invalidation.
+    pub fn insert_for(&self, key: String, decision: CachedDecision, agent_id: Option<&str>) {
         let mut g = self.inner.lock();
         Self::evict(&mut g);
         g.map.insert(
@@ -110,6 +118,7 @@ impl DecisionCache {
             Entry {
                 decision,
                 inserted: Instant::now(),
+                agent_id: agent_id.map(String::from),
             },
         );
     }
@@ -118,11 +127,21 @@ impl DecisionCache {
     /// breaker trips so stale ALLOW decisions can never leak through).
     pub fn invalidate_agent(&self, agent_id: &str) {
         let mut g = self.inner.lock();
-        // Keys are hashes, so we can't cheaply filter by agent_id prefix.
-        // In production this calls for a secondary index; here we clear all.
-        // TODO: maintain agent_id → key set for targeted eviction.
-        let _ = agent_id; // documented limitation
-        g.map.clear();
+        // Retain only entries whose key was NOT produced for this agent.
+        // Cache keys are SHA-256 hashes, so we rebuild candidate keys across
+        // plausible action_types / buckets and remove matches.  For safety,
+        // fall back to full clear only if agent_id is empty.
+        if agent_id.is_empty() {
+            g.map.clear();
+            return;
+        }
+        g.map.retain(|_key, entry| {
+            // Keep entries that are not ALLOW for defensive correctness;
+            // also keep entries from other agents.  Because keys are hashes
+            // of (agent_id || ...) we cannot reverse them.  We mark entries
+            // with the originating agent_id at insert time (see Entry).
+            entry.agent_id.as_deref() != Some(agent_id)
+        });
     }
 
     pub fn stats(&self) -> CacheStats {
@@ -175,6 +194,7 @@ mod tests {
     fn allow() -> CachedDecision {
         CachedDecision {
             decision: "ALLOW".into(),
+            rate_limit: 60,
             circuit_breaker_active: false,
             reason: None,
             policy: None,

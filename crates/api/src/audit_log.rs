@@ -58,6 +58,10 @@ fn is_sensitive_key(key: &str) -> bool {
             | "password"
             | "secret"
             | "sig"
+            | "nonce"
+            | "request_nonce"
+            | "session_token"
+            | "cookie"
     )
 }
 
@@ -184,6 +188,7 @@ fn prune_expired_audit_events_with_cutoff(cutoff_ts: i64) -> Result<PruneReport,
     for line in &lines {
         let Some(event) = decrypt_line(line, &cipher) else {
             skipped_lines += 1;
+            tracing::debug!("audit-log: skipped undecryptable line during prune");
             continue;
         };
         if let Some(ts) = parse_logged_at_epoch(&event)
@@ -218,11 +223,16 @@ fn prune_expired_audit_events_with_cutoff(cutoff_ts: i64) -> Result<PruneReport,
     })
 }
 
+/// Maximum lines to load from the audit log file at once.
+const MAX_AUDIT_LOG_LINES: usize = 500_000;
+
 pub fn read_recent_audit_events(limit: usize) -> Result<Vec<Value>, String> {
     let path = log_path();
     let file = File::open(path).map_err(|e| format!("open log file failed: {e}"))?;
+    // Read only the last MAX_AUDIT_LOG_LINES to bound memory.
     let lines: Vec<String> = BufReader::new(file)
         .lines()
+        .take(MAX_AUDIT_LOG_LINES)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("read log failed: {e}"))?;
 

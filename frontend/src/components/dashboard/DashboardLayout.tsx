@@ -12,7 +12,6 @@ const NAV_ITEMS = [
   { href: "/dashboard/agents", label: "Agent Status Board" },
   { href: "/dashboard/thresholds", label: "Threshold Config" },
   { href: "/dashboard/risk-advisories", label: "Risk Advisories" },
-  { href: "/dashboard/crypto", label: "Crypto Inspector" },
   { href: "/dashboard/agent-intent", label: "Agent Intent" },
   { href: "/dashboard/ab-variants", label: "A/B Variants" },
   { href: "/dashboard/agent-evolution", label: "Agent Evolution" },

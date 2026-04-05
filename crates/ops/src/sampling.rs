@@ -152,19 +152,21 @@ impl StratifiedSampler {
     /// Adjusts sampling rates based on observed anomaly rates.
     /// Increases sampling where anomalies are found.
     pub fn optimize_sampling_rates(&mut self, min_rate: f64, max_rate: f64) {
+        let safe_max = if max_rate.is_finite() { max_rate } else { 1.0 };
+        let safe_min = if min_rate.is_finite() { min_rate } else { 0.0 };
         for stratum in self.strata.values_mut() {
             let anomaly_rate = stratum.anomaly_rate();
             
             // Increase sampling where anomalies are found (>5% threshold)
             if anomaly_rate > 0.05 {
-                stratum.sampling_rate = (stratum.sampling_rate * 2.0).min(max_rate);
+                stratum.sampling_rate = (stratum.sampling_rate * 2.0).min(safe_max);
             } else if anomaly_rate < 0.01 {
                 // Decrease sampling where few anomalies found
-                stratum.sampling_rate = (stratum.sampling_rate * 0.8).max(min_rate);
+                stratum.sampling_rate = (stratum.sampling_rate * 0.8).max(safe_min);
             }
             
             // Ensure within bounds
-            stratum.sampling_rate = stratum.sampling_rate.clamp(min_rate, max_rate);
+            stratum.sampling_rate = stratum.sampling_rate.clamp(safe_min, safe_max);
         }
     }
 

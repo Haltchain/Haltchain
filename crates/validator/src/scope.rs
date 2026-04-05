@@ -24,7 +24,10 @@ pub fn extract_scopes(auth_header: &str) -> Vec<String> {
     let sig_b64 = parts[2];
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
-    let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "secret".to_string());
+    let secret = match std::env::var("JWT_SECRET") {
+        Ok(s) if !s.is_empty() => s,
+        _ => return vec![],  // No valid JWT_SECRET — reject all tokens
+    };
     if let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
         mac.update(header_payload.as_bytes());
         let expected_sig = mac.finalize().into_bytes();
@@ -86,6 +89,10 @@ pub fn extract_scopes(auth_header: &str) -> Vec<String> {
 mod tests {
     use super::*;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use std::sync::Mutex;
+
+    /// Tests share the process environment; serialize access to JWT_SECRET.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn make_jwt(payload_json: &str) -> String {
         use hmac::{Hmac, Mac};
@@ -93,24 +100,36 @@ mod tests {
         let header = URL_SAFE_NO_PAD.encode(r#"{"alg":"HS256","typ":"JWT"}"#);
         let payload = URL_SAFE_NO_PAD.encode(payload_json);
         let msg = format!("{header}.{payload}");
-        let mut mac = Hmac::<Sha256>::new_from_slice(b"secret").unwrap();
+        let mut mac = Hmac::<Sha256>::new_from_slice(b"test-jwt-secret").unwrap();
         mac.update(msg.as_bytes());
         let sig = URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
         format!("{msg}.{sig}")
     }
 
+    fn with_jwt_secret<F: FnOnce()>(f: F) {
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: tests are serialized via ENV_LOCK so no concurrent env mutation.
+        unsafe { std::env::set_var("JWT_SECRET", "test-jwt-secret") };
+        f();
+        unsafe { std::env::remove_var("JWT_SECRET") };
+    }
+
     #[test]
     fn extracts_space_separated_scope() {
-        let jwt = make_jwt(r#"{"sub":"agent1","scope":"read:users write:logs"}"#);
-        let scopes = extract_scopes(&format!("Bearer {jwt}"));
-        assert_eq!(scopes, vec!["read:users", "write:logs"]);
+        with_jwt_secret(|| {
+            let jwt = make_jwt(r#"{"sub":"agent1","scope":"read:users write:logs"}"#);
+            let scopes = extract_scopes(&format!("Bearer {jwt}"));
+            assert_eq!(scopes, vec!["read:users", "write:logs"]);
+        });
     }
 
     #[test]
     fn extracts_array_scp() {
-        let jwt = make_jwt(r#"{"sub":"agent1","scp":["read:data","execute:tool"]}"#);
-        let scopes = extract_scopes(&jwt);
-        assert_eq!(scopes, vec!["read:data", "execute:tool"]);
+        with_jwt_secret(|| {
+            let jwt = make_jwt(r#"{"sub":"agent1","scp":["read:data","execute:tool"]}"#);
+            let scopes = extract_scopes(&jwt);
+            assert_eq!(scopes, vec!["read:data", "execute:tool"]);
+        });
     }
 
     #[test]
@@ -121,7 +140,18 @@ mod tests {
 
     #[test]
     fn strips_bearer_prefix() {
+        with_jwt_secret(|| {
+            let jwt = make_jwt(r#"{"scope":"admin"}"#);
+            assert_eq!(extract_scopes(&format!("Bearer {jwt}")), vec!["admin"]);
+        });
+    }
+
+    #[test]
+    fn rejects_when_no_jwt_secret() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        //safety: tests are serialized via ENV_LOCK so no concurrent env mutation.
+        unsafe { std::env::remove_var("JWT_SECRET") };
         let jwt = make_jwt(r#"{"scope":"admin"}"#);
-        assert_eq!(extract_scopes(&format!("Bearer {jwt}")), vec!["admin"]);
+        assert!(extract_scopes(&jwt).is_empty());
     }
 }

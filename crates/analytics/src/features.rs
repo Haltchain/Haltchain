@@ -8,6 +8,12 @@ use std::time::Instant;
 
 use serde::Serialize;
 
+/// Window durations for velocity calculations.
+const WINDOW_1MIN_SECS: f64 = 60.0;
+const WINDOW_5MIN_SECS: f64 = 300.0;
+/// Threshold below which mean_amount is considered effectively zero.
+const EPSILON_AMOUNT: f64 = 1e-9;
+
 /// Feature vector derived from a window of transaction amounts.
 #[derive(Debug, Clone, Serialize)]
 pub struct FeatureVector {
@@ -38,20 +44,18 @@ pub fn extract(
     prev_velocity_1m: f64,
 ) -> FeatureVector {
     let now = Instant::now();
-    let window_60s = 60.0;
-    let window_300s = 300.0;
 
     let count_1m = amounts
         .iter()
-        .filter(|(t, _)| now.saturating_duration_since(*t).as_secs_f64() <= 60.0)
+        .filter(|(t, _)| now.saturating_duration_since(*t).as_secs_f64() <= WINDOW_1MIN_SECS)
         .count();
     let count_5m = amounts
         .iter()
-        .filter(|(t, _)| now.saturating_duration_since(*t).as_secs_f64() <= 300.0)
+        .filter(|(t, _)| now.saturating_duration_since(*t).as_secs_f64() <= WINDOW_5MIN_SECS)
         .count();
 
-    let v1m = count_1m as f64 / window_60s;
-    let v5m = count_5m as f64 / window_300s;
+    let v1m = count_1m as f64 / WINDOW_1MIN_SECS;
+    let v5m = count_5m as f64 / WINDOW_5MIN_SECS;
     let acceleration = v1m - prev_velocity_1m;
 
     let n = amounts.len() as f64;
@@ -61,7 +65,7 @@ pub fn extract(
         amounts.iter().map(|(_, a)| a).sum::<f64>() / n
     };
 
-    let cv_amount = if mean_amount.abs() < 1e-9 || amounts.len() < 2 {
+    let cv_amount = if mean_amount.abs() < EPSILON_AMOUNT || amounts.len() < 2 {
         0.0
     } else {
         let var: f64 = amounts

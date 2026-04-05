@@ -145,26 +145,7 @@ export function getRiskAdvisories(agentId: string, sinceId?: number) {
   return request<{ advisories: RiskAdvisory[] }>(`/api/risk/advisories/${encodeURIComponent(agentId)}${qs}`);
 }
 
-export type PublicKeyInfo = {
-  public_key_b64: string;
-  key_id: string;
-  algorithm: string;
-};
 
-export function getPublicKey() {
-  return request<PublicKeyInfo>("/api/public-key");
-}
-
-export type MerkleStatus = {
-  root_hex?: string | null;
-  leaf_count: number;
-  day_of_year: number;
-  last_updated?: string | null;
-};
-
-export function getMerkleRoot() {
-  return request<MerkleStatus>("/api/merkle/root");
-}
 
 export type DriftStatus = {
   agent_id: string;
@@ -174,6 +155,7 @@ export type DriftStatus = {
   last_action?: string | null;
   samples: number;
   history?: Array<{ score: number; at: string }>;
+  cumulative_drift?: number | null;
 };
 
 export function getDriftStatus(agentId: string, sessionId: string) {

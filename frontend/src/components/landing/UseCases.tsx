@@ -4,8 +4,8 @@ import { Wallet, Building2, Vote } from "lucide-react";
 export function UseCases() {
   const cases = [
     {
-      title: "DeFi Agents",
-      desc: "Prevent trading bots from liquidating the treasury due to hallucinations. Enforce hard limits on slippage, asset exposure, and transaction frequency before the TX is signed.",
+      title: "Financial Operations",
+      desc: "Prevent AI agents from executing unauthorized transactions or exceeding risk limits. Enforce hard caps on amounts, velocity, and counterparty exposure in real time.",
       icon: <Wallet className="w-8 h-8 text-primary" />,
       gradient: "from-blue-900/20 to-background"
     },
@@ -16,8 +16,8 @@ export function UseCases() {
       gradient: "from-purple-900/20 to-background"
     },
     {
-      title: "On-chain Governance",
-      desc: "Allow AI delegates to vote on proposals while ensuring they mathematically cannot violate core constitutional constraints defined by the DAO.",
+      title: "Governance & Compliance",
+      desc: "Allow AI agents to participate in approval workflows while ensuring they cannot violate organizational policies or regulatory constraints.",
       icon: <Vote className="w-8 h-8 text-primary" />,
       gradient: "from-emerald-900/20 to-background"
     }

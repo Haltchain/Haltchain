@@ -21,13 +21,17 @@ pub struct ReferenceDistribution {
 impl ReferenceDistribution {
     pub fn new(benign_scores: Vec<f64>) -> Self {
         let mut sorted = benign_scores.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.total_cmp(b));
         
-        let mean = sorted.iter().sum::<f64>() / sorted.len().max(1) as f64;
-        let variance = sorted.iter()
-            .map(|x| (x - mean).powi(2))
-            .sum::<f64>() / sorted.len().max(1) as f64;
-        let std_dev = variance.sqrt();
+        let (mean, std_dev) = if sorted.is_empty() {
+            (0.0, 0.0)
+        } else {
+            let m = sorted.iter().sum::<f64>() / sorted.len() as f64;
+            let v = sorted.iter()
+                .map(|x| (x - m).powi(2))
+                .sum::<f64>() / sorted.len() as f64;
+            (m, v.sqrt())
+        };
         
         let mut cached = HashMap::new();
         // Pre-compute common percentiles

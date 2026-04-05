@@ -18,6 +18,8 @@ pub mod goal;
 pub mod model;
 pub mod onnx_model;
 pub mod pipeline;
+#[cfg(feature = "redis-cache")]
+pub mod redis_cache;
 
 pub use cache::EmbeddingCache;
 pub use clarification::{ClarificationDecision, ClarificationProtocol, DRIFT_THRESHOLD};

@@ -25,12 +25,17 @@ async fn main() {
 
     let state = AppState::new_async().await;
     {
+        let learning_interval: u64 = std::env::var("HALTCHAIN_LEARNING_INTERVAL_SECS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(120);
+        let learning_max_age: i64 = std::env::var("HALTCHAIN_LEARNING_MAX_AGE_HOURS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(24);
         let state = Arc::clone(&state);
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(120));
+            info!(interval_secs = learning_interval, "background worker started: learning-loop");
+            let mut ticker = tokio::time::interval(Duration::from_secs(learning_interval));
             loop {
                 ticker.tick().await;
-                let report = state.run_learning_loop_once(24).await;
+                let report = state.run_learning_loop_once(learning_max_age).await;
                 if report.generated > 0 {
                     info!(
                         generated = report.generated,
@@ -42,9 +47,12 @@ async fn main() {
         });
     }
     {
+        let wal_interval: u64 = std::env::var("HALTCHAIN_WAL_FLUSH_INTERVAL_SECS")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(60);
         let state = Arc::clone(&state);
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(60));
+            info!(interval_secs = wal_interval, "background worker started: WAL flush");
+            let mut ticker = tokio::time::interval(Duration::from_secs(wal_interval));
             loop {
                 ticker.tick().await;
                 state.flush_capability_wal().await;
@@ -81,7 +89,19 @@ async fn main() {
         });
     }
 
+    {   // Rate limiter stale-entry cleanup
+        tokio::spawn(async move {
+            info!("background worker started: rate-limiter cleanup");
+            let mut ticker = tokio::time::interval(Duration::from_secs(120));
+            loop {
+                ticker.tick().await;
+                crate::auth::rate_limiter().cleanup();
+            }
+        });
+    }
+
     // Deep-scan async worker: dequeues Standard-tier tasks, runs cognitive deep_scan.
+    info!("spawning deep-scan worker");
     state.spawn_scan_worker();
 
     // Bootstrap first admin user from env vars if admin_users table is empty.
@@ -99,16 +119,48 @@ async fn main() {
 
     if let Some(acceptor) = tls::tls_acceptor_from_env() {
         info!("HaltChain Validator listening on {addr} (TLS)");
-        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(&addr).await
+            .expect("failed to bind TCP listener (is the port in use?)");
+        // Bound concurrent TLS connections to prevent resource exhaustion.
+        let max_conns: usize = std::env::var("HALTCHAIN_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(max_conns));
         loop {
-            let (tcp_stream, _) = listener.accept().await.unwrap();
+            let (tcp_stream, _) = match listener.accept().await {
+                Ok(conn) => conn,
+                Err(e) => {
+                    tracing::warn!("TCP accept error: {e}");
+                    continue;
+                }
+            };
             let acceptor = acceptor.clone();
             let app = app.clone();
+            let permit = match semaphore.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::warn!("Max TLS connections reached, dropping new connection");
+                    drop(tcp_stream);
+                    continue;
+                }
+            };
             tokio::spawn(async move {
-                let tls_stream = match acceptor.accept(tcp_stream).await {
-                    Ok(s) => s,
-                    Err(e) => {
+                let _permit = permit; // held until task completes
+                // TLS handshake with timeout to prevent slowloris.
+                let tls_stream = match tokio::time::timeout(
+                    Duration::from_secs(10),
+                    acceptor.accept(tcp_stream),
+                )
+                .await
+                {
+                    Ok(Ok(s)) => s,
+                    Ok(Err(e)) => {
                         tracing::warn!("TLS handshake failed: {e}");
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::warn!("TLS handshake timed out");
                         return;
                     }
                 };
@@ -127,8 +179,10 @@ async fn main() {
         }
     } else {
         info!("HaltChain Validator listening on {addr} (plain HTTP)");
-        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-        axum::serve(listener, app).await.unwrap();
+        let listener = tokio::net::TcpListener::bind(&addr).await
+            .expect("failed to bind TCP listener (is the port in use?)");
+        axum::serve(listener, app).await
+            .expect("HTTP server error");
     }
 }
 

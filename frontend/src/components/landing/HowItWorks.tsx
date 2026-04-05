@@ -23,8 +23,8 @@ export function HowItWorks() {
     },
     {
       num: "04",
-      title: "Decision anchored",
-      desc: "The approved action is cryptographically signed and Merkle-anchored on-chain.",
+      title: "Decision logged",
+      desc: "The approved action is cryptographically signed and logged to an immutable audit trail.",
       icon: <LinkIcon className="w-6 h-6 text-primary" />
     }
   ];

@@ -120,11 +120,18 @@ impl DbStore {
     pub async fn connect(url: &str) -> Result<Self, DbError> {
         let is_supabase = url.contains("supabase.com") || url.contains("pooler.supabase.com");
         let require_ssl = read_bool_env("HALTCHAIN_DB_REQUIRE_SSL", is_supabase);
-        if require_ssl && !url.to_ascii_lowercase().contains("sslmode=require") {
-            return Err(DbError::Misconfigured(
-                "DATABASE_URL must include sslmode=require when HALTCHAIN_DB_REQUIRE_SSL is enabled"
-                    .to_string(),
-            ));
+        if require_ssl {
+            let lower = url.to_ascii_lowercase();
+            let has_ssl = lower.contains("sslmode=require")
+                || lower.contains("sslmode=verify-ca")
+                || lower.contains("sslmode=verify-full");
+            if !has_ssl {
+                return Err(DbError::Misconfigured(
+                    "DATABASE_URL must include sslmode=require (or verify-ca / verify-full) \
+                     when HALTCHAIN_DB_REQUIRE_SSL is enabled"
+                        .to_string(),
+                ));
+            }
         }
 
         let max_connections = read_u32_env("HALTCHAIN_DB_MAX_CONNECTIONS", 10).max(1);

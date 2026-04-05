@@ -40,7 +40,9 @@ impl GeoPoint {
             + self.lat.to_radians().cos()
                 * other.lat.to_radians().cos()
                 * (dlon / 2.0).sin().powi(2);
-        2.0 * EARTH_RADIUS_KM * a.sqrt().asin()
+        // Clamp to [0,1] to guard against float rounding pushing a > 1.0
+        // which makes asin() return NaN.
+        2.0 * EARTH_RADIUS_KM * a.clamp(0.0, 1.0).sqrt().asin()
     }
 }
 

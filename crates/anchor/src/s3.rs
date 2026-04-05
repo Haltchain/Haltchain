@@ -12,7 +12,11 @@ fn sha256_hex(data: &[u8]) -> String {
 }
 
 fn hmac_sha256_bytes(key: &[u8], data: &[u8]) -> Vec<u8> {
-    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC accepts any key size");
+    // HMAC-SHA256 accepts any key size (RFC 2104 §2: keys shorter than block
+    // size are zero-padded, longer keys are hashed).  new_from_slice only
+    // fails for algorithm-level InvalidLength which cannot happen for SHA-256.
+    let mut mac = HmacSha256::new_from_slice(key)
+        .unwrap_or_else(|_| unreachable!("HMAC-SHA256 accepts any key length"));
     mac.update(data);
     mac.finalize().into_bytes().to_vec()
 }

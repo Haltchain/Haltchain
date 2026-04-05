@@ -82,12 +82,12 @@ impl CoreDistanceDetector {
                 .collect();
             
             // Get k-th smallest (k-th nearest neighbor)
-            point_dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            point_dists.sort_by(|a, b| a.total_cmp(b));
             let kth_dist = point_dists.get(self.k).copied().unwrap_or(1.0);
             distances.push(kth_dist);
         }
         
-        distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        distances.sort_by(|a, b| a.total_cmp(b));
         
         self.calibration_stats = CalibrationStats {
             mean: distances.iter().sum::<f32>() / distances.len() as f32,
@@ -410,7 +410,7 @@ fn std_dev(data: &[f32]) -> f32 {
 
 fn quickselect(mut data: Vec<f32>, k: usize) -> f32 {
     // Simplified quickselect for k-th smallest
-    data.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    data.sort_by(|a, b| a.total_cmp(b));
     data.get(k).copied().unwrap_or(1.0)
 }
 

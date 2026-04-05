@@ -380,9 +380,9 @@ impl RaftNode {
     }
 
     fn broadcast_heartbeat(&mut self) -> Vec<RaftAction> {
-        let peers: Vec<u64> = self.peers.clone();
+        let peer_ids: Vec<u64> = self.peers.iter().copied().collect();
         let mut actions = vec![];
-        for p in peers {
+        for p in peer_ids {
             actions.extend(self.send_append(p));
         }
         actions
@@ -410,9 +410,8 @@ impl RaftNode {
     }
 
     fn replicate_to_peers(&self) -> Vec<RaftAction> {
-        let peers: Vec<u64> = self.peers.clone();
         let mut actions = vec![];
-        for p in peers {
+        for &p in &self.peers {
             actions.extend(self.send_append(p));
         }
         actions

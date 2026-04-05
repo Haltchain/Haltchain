@@ -22,6 +22,12 @@ const K_VALUES: [usize; 3] = [5, 20, 50];
 /// Lowered for test compatibility - production should use 100+
 const MIN_CALIBRATION_SAMPLES: usize = 40;
 
+/// Discount factor applied to raw anchor floor during initialization.
+const ANCHOR_FLOOR_DISCOUNT: f64 = 0.9;
+
+/// Maximum entries in the benign reference history.
+const MAX_HISTORY: usize = 10_000;
+
 /// Calibration stats with stored scores for percentile calculation
 #[derive(Clone)]
 struct CalibrationStatsWithScores {
@@ -70,7 +76,7 @@ impl OnnxDetector {
             benign_refs: Mutex::new(Vec::new()),
             cached_distances: Mutex::new(Vec::new()),
             calibration: Mutex::new(None),
-            max_history: 10000,
+            max_history: MAX_HISTORY,
             attack_anchors: Mutex::new(Vec::new()),
             anchor_floor: Mutex::new(None),
         };
@@ -146,6 +152,25 @@ impl OnnxDetector {
                 .flat_map(|(_, embeddings)| embeddings.clone())
                 .collect()
         };
+        // Set a conservative initial anchor_floor before calibration so that
+        // known-attack patterns are not missed during the startup window.
+        if !anchors.is_empty() {
+            let benign_refs = self.benign_refs.lock();
+            if !benign_refs.is_empty() {
+                let min_floor = anchors.iter().map(|anchor| {
+                    let mut dists: Vec<f64> = benign_refs
+                        .iter()
+                        .map(|r| euclidean_distance(anchor, r))
+                        .collect();
+                    dists.sort_by(|a, b| a.total_cmp(b));
+                    dists.get(4).copied()
+                        .unwrap_or_else(|| dists.last().copied().unwrap_or(f64::INFINITY))
+                }).fold(f64::INFINITY, f64::min);
+                if min_floor.is_finite() {
+                    *self.anchor_floor.lock() = Some(min_floor * ANCHOR_FLOOR_DISCOUNT);
+                }
+            }
+        }
         *self.attack_anchors.lock() = anchors;
     }
 
@@ -181,7 +206,7 @@ impl OnnxDetector {
             .collect();
         
         // Sort distances once
-        distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        distances.sort_by(|a, b| a.total_cmp(b));
         
         // Adapt k values to available samples
         let max_k = (refs.len() / 2).min(K_VALUES[2]).max(1);
@@ -404,7 +429,7 @@ impl OnnxDetector {
         }
         
         let mut sorted = data.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted.sort_by(|a, b| a.total_cmp(b));
         
         let trim_count = (data.len() as f64 * trim_ratio) as usize;
         let trimmed = &sorted[trim_count..sorted.len().saturating_sub(trim_count)];
@@ -454,14 +479,14 @@ impl OnnxDetector {
                 .collect();
             
             // Get k-th nearest for each scale
-            point_dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            point_dists.sort_by(|a, b| a.total_cmp(b));
             let kth_dist = point_dists.get(K_VALUES[1]) // Use k=20 as representative
                 .copied()
                 .unwrap_or(1.0);
             all_distances.push(kth_dist);
         }
         
-        all_distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        all_distances.sort_by(|a, b| a.total_cmp(b));
 
         // Compute attack anchor floor: minimum k=5 NN distance of any attack
         // anchor to the current benign distribution.  Any future query whose
@@ -477,11 +502,11 @@ impl OnnxDetector {
                         .iter()
                         .map(|r| euclidean_distance(anchor, r))
                         .collect();
-                    dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                    dists.sort_by(|a, b| a.total_cmp(b));
                     dists.get(4).copied()
                         .unwrap_or_else(|| dists.last().copied().unwrap_or(f64::INFINITY))
                 }).fold(f64::INFINITY, f64::min);
-                if min_floor.is_finite() { Some(min_floor * 0.9) } else { None }
+                if min_floor.is_finite() { Some(min_floor * ANCHOR_FLOOR_DISCOUNT) } else { None }
             }
         };
 

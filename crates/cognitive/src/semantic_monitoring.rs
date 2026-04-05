@@ -160,20 +160,19 @@ impl HnswIndex {
 
                     let dist = euclidean_distance(query, &self.embeddings[neighbor_id]);
                     
-                    // Add to candidates if within search scope
-                    if candidates.len() < ef_search {
+                    // Add to candidates if within search scope.
+                    // Compare against worst result (if available) to avoid
+                    // exploring hopeless branches.
+                    let dominated_by_results = results.len() >= k
+                        && results.peek().map(|w| dist >= w.distance).unwrap_or(false);
+                    if !dominated_by_results {
+                        if candidates.len() >= ef_search {
+                            candidates.pop(); // drop closest (max of negated)
+                        }
                         candidates.push(SearchNode { 
                             node_id: neighbor_id, 
                             distance: -dist // Negate for min-heap
                         });
-                    } else if let Some(worst_candidate) = candidates.peek() {
-                        if dist < -worst_candidate.distance {
-                            candidates.pop();
-                            candidates.push(SearchNode { 
-                                node_id: neighbor_id, 
-                                distance: -dist 
-                            });
-                        }
                     }
                 }
             }

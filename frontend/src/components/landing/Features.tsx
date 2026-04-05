@@ -20,8 +20,8 @@ export function Features() {
       icon: <ShieldCheck className="w-6 h-6 text-primary" />
     },
     {
-      title: "Merkle Anchoring",
-      description: "Every decision is hashed and anchored to Ethereum, providing an immutable audit trail.",
+      title: "Cryptographic Audit Trail",
+      description: "Every decision is cryptographically signed and logged, providing an immutable record for compliance.",
       icon: <Layers className="w-6 h-6 text-primary" />
     },
     {

@@ -452,7 +452,9 @@ fn relative_delta(old: f64, new: f64) -> f64 {
         if new.abs() <= f64::EPSILON {
             0.0
         } else {
-            f64::INFINITY
+            // Cap at 100× (10,000%) instead of Infinity to keep downstream
+            // ratio comparisons well-defined.
+            100.0
         }
     } else {
         (new - old).abs() / old.abs()

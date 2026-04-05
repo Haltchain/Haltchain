@@ -154,14 +154,30 @@ pub fn client_pubkey_store() -> &'static DashMap<String, VerifyingKey> {
         // Load from environment: HALTCHAIN_CLIENT_PUBKEYS=key1:base64pubkey1,key2:base64pubkey2
         if let Ok(env_keys) = std::env::var("HALTCHAIN_CLIENT_PUBKEYS") {
             for entry in env_keys.split(',') {
-                if let Some((key_id, pubkey_b64)) = entry.split_once(':')
-                    && let Ok(pubkey_bytes) = general_purpose::STANDARD.decode(pubkey_b64.trim())
-                    && pubkey_bytes.len() == 32
-                {
-                    let mut bytes = [0u8; 32];
-                    bytes.copy_from_slice(&pubkey_bytes);
-                    if let Ok(pubkey) = VerifyingKey::from_bytes(&bytes) {
+                let entry = entry.trim();
+                if entry.is_empty() {
+                    continue;
+                }
+                let Some((key_id, pubkey_b64)) = entry.split_once(':') else {
+                    warn!(entry = %entry, "skipped malformed client pubkey entry (missing ':')");
+                    continue;
+                };
+                let Ok(pubkey_bytes) = general_purpose::STANDARD.decode(pubkey_b64.trim()) else {
+                    warn!(key_id = %key_id.trim(), "skipped client pubkey: base64 decode failed");
+                    continue;
+                };
+                if pubkey_bytes.len() != 32 {
+                    warn!(key_id = %key_id.trim(), len = pubkey_bytes.len(), "skipped client pubkey: expected 32 bytes");
+                    continue;
+                }
+                let mut bytes = [0u8; 32];
+                bytes.copy_from_slice(&pubkey_bytes);
+                match VerifyingKey::from_bytes(&bytes) {
+                    Ok(pubkey) => {
                         map.insert(key_id.trim().to_string(), pubkey);
+                    }
+                    Err(e) => {
+                        warn!(key_id = %key_id.trim(), error = %e, "skipped client pubkey: invalid Ed25519 key");
                     }
                 }
             }
@@ -529,6 +545,9 @@ pub fn last_sweep() -> &'static Mutex<Instant> {
     LAST_SWEEP.get_or_init(|| Mutex::new(Instant::now()))
 }
 
+/// Hard cap on nonce entries to bound memory under sustained load.
+const MAX_NONCE_ENTRIES: usize = 50_000;
+
 /// Check and insert nonce. Returns false if nonce already exists (replay detected).
 pub fn check_and_insert_nonce(nonce: &str) -> bool {
     let now = Instant::now();
@@ -544,6 +563,10 @@ pub fn check_and_insert_nonce(nonce: &str) -> bool {
 
     let mut store = nonce_store().lock();
     if store.contains_key(nonce) {
+        return false;
+    }
+    if store.len() >= MAX_NONCE_ENTRIES {
+        warn!("nonce store at capacity ({MAX_NONCE_ENTRIES}), rejecting new nonce");
         return false;
     }
     store.insert(nonce.to_string(), now);
@@ -605,12 +628,15 @@ pub async fn security_middleware(
     if has_ed25519 {
         // Clone body for signature verification
         let (parts, body) = req.into_parts();
-        let body_bytes = axum::body::to_bytes(body, usize::MAX).await.map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(json!({"error": "Failed to read body"})),
-            )
-        })?;
+        // Cap body read at 10 MB to prevent OOM.
+        let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    Json(json!({"error": "Request body too large"})),
+                )
+            })?;
 
         match verify_ed25519_request_sig(&headers, &body_bytes) {
             Ok(true) => {
@@ -708,14 +734,16 @@ pub fn verify_totp(secret_hex: &str, provided_code: &str) -> bool {
 /// When the env vars are absent all layers collapse to key-only, preserving
 /// backward-compatible local dev behaviour.
 pub fn require_admin_mfa(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    // Browser sessions authenticated via JWT skip the extra MFA layers — the
-    // password-based login is the human auth factor.
+    // Browser sessions authenticated via JWT still require admin key to be
+    // present, preventing leaked JWTs from granting standalone admin access.
     if let Some(token) = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         && verify_admin_session_jwt(token).is_some()
     {
+        // JWT is only a second factor — admin key must still be valid.
+        require_admin(headers)?;
         return Ok(());
     }
 

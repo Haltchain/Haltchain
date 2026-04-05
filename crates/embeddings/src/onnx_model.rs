@@ -67,7 +67,15 @@ impl OnnxModel {
     /// Returns error if model files not found or invalid.
     pub fn from_dir(model_dir: impl AsRef<Path>) -> Result<Self, OnnxError> {
         let model_dir = model_dir.as_ref();
-        let model_path = model_dir.join("model.onnx");
+        // Prefer quantized model if available (INT8 dynamic quantization)
+        let model_path = {
+            let quantized = model_dir.join("model_quantized.onnx");
+            if quantized.exists() {
+                quantized
+            } else {
+                model_dir.join("model.onnx")
+            }
+        };
         let tokenizer_path = model_dir.join("tokenizer.json");
 
         if !model_path.exists() {
@@ -244,7 +252,7 @@ impl OnnxModel {
         embedding
     }
     
-    fn hash_text(text: &str) -> u64 {
+    pub fn hash_text(text: &str) -> u64 {
         let mut hasher = std::hash::DefaultHasher::new();
         text.hash(&mut hasher);
         hasher.finish()
@@ -290,7 +298,10 @@ impl OnnxModel {
             }
         }
         
-        results.into_iter().map(|r| r.unwrap_or_else(|| vec![0.0; self.dims])).collect()
+        results.into_iter().map(|r| r.unwrap_or_else(|| {
+            tracing::warn!("embedding cache miss produced no result; returning zero vector");
+            vec![0.0; self.dims]
+        })).collect()
     }
 
     /// Raw ONNX inference without cache. Used internally.
@@ -352,26 +363,38 @@ impl OnnxModel {
         let mut session = self.session.lock();
         
         // Create input values - from_array takes the ndarray directly
-        let input_ids_value = Value::from_array(
-            ndarray::Array::from_shape_vec(
+        let input_ids_value = match ndarray::Array::from_shape_vec(
                 IxDyn(&[batch_size, seq_length]),
                 input_ids.iter().cloned().collect()
-            ).unwrap()
-        ).unwrap();
+            ).and_then(|a| Value::from_array(a).map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported).into())) {
+            Ok(v) => v,
+            Err(_) => {
+                tracing::error!("failed to create input_ids tensor");
+                return texts.iter().map(|_| vec![0.0; self.dims]).collect();
+            }
+        };
         
-        let attention_mask_value = Value::from_array(
-            ndarray::Array::from_shape_vec(
+        let attention_mask_value = match ndarray::Array::from_shape_vec(
                 IxDyn(&[batch_size, seq_length]),
                 attention_mask.iter().cloned().collect()
-            ).unwrap()
-        ).unwrap();
+            ).and_then(|a| Value::from_array(a).map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported).into())) {
+            Ok(v) => v,
+            Err(_) => {
+                tracing::error!("failed to create attention_mask tensor");
+                return texts.iter().map(|_| vec![0.0; self.dims]).collect();
+            }
+        };
         
-        let token_type_ids_value = Value::from_array(
-            ndarray::Array::from_shape_vec(
+        let token_type_ids_value = match ndarray::Array::from_shape_vec(
                 IxDyn(&[batch_size, seq_length]),
                 token_type_ids.iter().cloned().collect()
-            ).unwrap()
-        ).unwrap();
+            ).and_then(|a| Value::from_array(a).map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported).into())) {
+            Ok(v) => v,
+            Err(_) => {
+                tracing::error!("failed to create token_type_ids tensor");
+                return texts.iter().map(|_| vec![0.0; self.dims]).collect();
+            }
+        };
 
         // Run inference - SessionInputs needs named inputs
         let inputs = vec![
@@ -384,13 +407,34 @@ impl OnnxModel {
             Err(_) => return texts.iter().map(|_| vec![0.0; self.dims]).collect(),
         };
 
-        // Extract token embeddings from first output
-        // Get the first output key and remove it
-        let first_key = outputs.keys().next().unwrap().to_string();
-        let output_value = outputs.remove(&first_key)
-            .unwrap_or_else(|| panic!("No outputs from model"));
-        let output_tensor = output_value.downcast::<ort::value::TensorValueType<f32>>().unwrap();
-        let (shape, output_data) = output_tensor.try_extract_tensor::<f32>().unwrap();
+        let first_key = match outputs.keys().next() {
+            Some(k) => k.to_string(),
+            None => {
+                tracing::error!("ONNX model returned no output keys");
+                return texts.iter().map(|_| vec![0.0; self.dims]).collect();
+            }
+        };
+        let output_value = match outputs.remove(&first_key) {
+            Some(v) => v,
+            None => {
+                tracing::error!("ONNX output key vanished after iteration");
+                return texts.iter().map(|_| vec![0.0; self.dims]).collect();
+            }
+        };
+        let output_tensor = match output_value.downcast::<ort::value::TensorValueType<f32>>() {
+            Ok(t) => t,
+            Err(_) => {
+                tracing::error!("ONNX output is not a float32 tensor");
+                return texts.iter().map(|_| vec![0.0; self.dims]).collect();
+            }
+        };
+        let (shape, output_data) = match output_tensor.try_extract_tensor::<f32>() {
+            Ok(pair) => pair,
+            Err(_) => {
+                tracing::error!("failed to extract tensor data from ONNX output");
+                return texts.iter().map(|_| vec![0.0; self.dims]).collect();
+            }
+        };
         
         // Convert to ndarray for processing
         let shape_vec: Vec<usize> = shape.iter().map(|&x| x as usize).collect();
@@ -398,10 +442,16 @@ impl OnnxModel {
         let seq_len = shape_vec[1];
         let hidden = shape_vec[2];
         
-        let token_embeddings = Array2::from_shape_vec(
+        let token_embeddings = match Array2::from_shape_vec(
             (batch * seq_len, hidden),
             output_data.iter().cloned().collect()
-        ).unwrap();
+        ) {
+            Ok(t) => t,
+            Err(_) => {
+                tracing::error!(batch, seq_len, hidden, "ONNX output shape mismatch");
+                return texts.iter().map(|_| vec![0.0; self.dims]).collect();
+            }
+        };
 
         // Mean pooling with attention mask
         let mut embeddings = Vec::with_capacity(batch_size);

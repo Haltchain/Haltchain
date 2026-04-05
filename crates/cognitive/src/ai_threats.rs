@@ -280,11 +280,16 @@ impl PromptInjectionDetector {
 
         for count in topic_counts.values() {
             let p = *count as f64 / total;
-            entropy -= p * p.log2();
+            if p > 0.0 {
+                entropy -= p * p.log2();
+            }
         }
 
         // Normalize by max possible entropy
-        let max_entropy = (topic_counts.len().max(2) as f64).log2();
+        let max_entropy = (topic_counts.len() as f64).log2();
+        if max_entropy <= 0.0 {
+            return 0.0;
+        }
         (entropy / max_entropy).clamp(0.0, 1.0)
     }
 

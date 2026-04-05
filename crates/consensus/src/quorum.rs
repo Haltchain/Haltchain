@@ -106,7 +106,7 @@ impl QuorumTracker {
         if approvals >= self.quorum {
             return QuorumDecision::Approved;
         }
-        if rejections > self.cluster_size - self.quorum {
+        if rejections > self.cluster_size.saturating_sub(self.quorum) {
             return QuorumDecision::Rejected;
         }
         if self.votes.len() >= self.cluster_size {

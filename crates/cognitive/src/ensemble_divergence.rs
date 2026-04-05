@@ -70,12 +70,12 @@ impl KCoreDistanceDetector {
                 .collect();
             
             // Get k-th smallest distance (k=20 default)
-            point_dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            point_dists.sort_by(|a, b| a.total_cmp(b));
             let kth_dist = point_dists.get(20).copied().unwrap_or(1.0);
             distances.push(kth_dist);
         }
         
-        distances.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        distances.sort_by(|a, b| a.total_cmp(b));
         
         let mut historical = self.historical_dists.write();
         *historical = distances;
@@ -93,7 +93,7 @@ impl KCoreDistanceDetector {
         
         // Robust aggregation: trimmed mean (remove 20% outliers)
         let mut sorted_dists = k_distances.clone();
-        sorted_dists.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        sorted_dists.sort_by(|a, b| a.total_cmp(b));
         let trimmed_mean = Self::trimmed_mean(&sorted_dists, 0.2);
         
         // Percentile rank against historical distribution (Section 2.1.3)

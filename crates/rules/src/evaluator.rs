@@ -85,14 +85,14 @@ fn eval_condition(cond: &Condition, ctx: &EvalContext) -> bool {
             Op::Neq => ctx_val != rule_val,
             Op::Contains => ctx_val.contains(rule_val),
             Op::Gt | Op::Gte | Op::Lt | Op::Lte => {
-                ctx_val.cmp(rule_val)
-                    == match cond.op {
-                        Op::Gt => std::cmp::Ordering::Greater,
-                        Op::Gte => std::cmp::Ordering::Greater, // ≥ handled below
-                        Op::Lt => std::cmp::Ordering::Less,
-                        Op::Lte => std::cmp::Ordering::Less,
-                        _ => unreachable!(),
-                    }
+                let ord = ctx_val.cmp(rule_val);
+                match cond.op {
+                    Op::Gt => ord == std::cmp::Ordering::Greater,
+                    Op::Gte => ord != std::cmp::Ordering::Less,
+                    Op::Lt => ord == std::cmp::Ordering::Less,
+                    Op::Lte => ord != std::cmp::Ordering::Greater,
+                    _ => unreachable!(),
+                }
             }
             Op::Regex => false, // regex support is a Week 4 stretch goal
         };

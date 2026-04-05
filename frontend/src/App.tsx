@@ -10,7 +10,6 @@ import RecommendationsPage from "@/pages/dashboard/Recommendations";
 import AgentsPage from "@/pages/dashboard/Agents";
 import ThresholdsPage from "@/pages/dashboard/Thresholds";
 import RiskAdvisoriesPage from "@/pages/dashboard/RiskAdvisories";
-import CryptoInspectorPage from "@/pages/dashboard/CryptoInspector";
 import AgentIntentPage from "@/pages/dashboard/AgentIntent";
 import ABVariantsPage from "@/pages/dashboard/ABVariants";
 import AgentEvolutionPage from "@/pages/dashboard/AgentEvolution";
@@ -35,7 +34,6 @@ function Router() {
       <Route path="/dashboard/agents" component={AgentsPage} />
       <Route path="/dashboard/thresholds" component={ThresholdsPage} />
       <Route path="/dashboard/risk-advisories" component={RiskAdvisoriesPage} />
-      <Route path="/dashboard/crypto" component={CryptoInspectorPage} />
       <Route path="/dashboard/agent-intent" component={AgentIntentPage} />
       <Route path="/dashboard/ab-variants" component={ABVariantsPage} />
       <Route path="/dashboard/agent-evolution" component={AgentEvolutionPage} />

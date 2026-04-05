@@ -103,8 +103,9 @@ pub fn tls_acceptor_from_env() -> Option<TlsAcceptor> {
     match build_tls_acceptor(&cert, &key, ca.as_deref()) {
         Ok(a) => Some(a),
         Err(e) => {
-            tracing::error!("Failed to initialise TLS: {e}");
-            std::process::exit(1);
+            // TLS env vars are set but config is broken — fail loudly so the
+            // operator fixes certs before going live.
+            panic!("Failed to initialise TLS (env vars present but invalid): {e}");
         }
     }
 }

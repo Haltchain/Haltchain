@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use haltchain_analytics::{
@@ -14,8 +15,8 @@ pub(crate) struct AgentState {
     pub action_timestamps: Vec<Instant>,
     pub circuit_break: Option<(Instant, Duration, String)>,
     pub tracker: SlidingWindowTracker,
-    pub recent_amounts: Vec<(Instant, f64)>,
-    pub recent_recipients: Vec<String>,
+    pub recent_amounts: VecDeque<(Instant, f64)>,
+    pub recent_recipients: VecDeque<String>,
     pub recent_features: Vec<Vec<f64>>,
     pub anomaly_model: Option<IsolationForest>,
     pub anomaly_generation: u64,
@@ -36,8 +37,8 @@ impl AgentState {
             action_timestamps: Vec::new(),
             circuit_break: None,
             tracker: SlidingWindowTracker::new(),
-            recent_amounts: Vec::new(),
-            recent_recipients: Vec::new(),
+            recent_amounts: VecDeque::new(),
+            recent_recipients: VecDeque::new(),
             recent_features: Vec::new(),
             anomaly_model: None,
             anomaly_generation: 0,
@@ -84,20 +85,21 @@ impl AgentState {
     ) -> (Option<AnomalyResult>, Option<AnomalyRetrainPlan>) {
         self.tracker.record(amount);
 
-        self.recent_amounts.push((Instant::now(), amount));
+        self.recent_amounts.push_back((Instant::now(), amount));
         if self.recent_amounts.len() > 512 {
-            self.recent_amounts.remove(0);
+            self.recent_amounts.pop_front();
         }
 
         self.recent_recipients
-            .push(recipient.unwrap_or("unknown").to_string());
+            .push_back(recipient.unwrap_or("unknown").to_string());
         if self.recent_recipients.len() > 512 {
-            self.recent_recipients.remove(0);
+            self.recent_recipients.pop_front();
         }
 
         let recipient_refs: Vec<&str> = self.recent_recipients.iter().map(String::as_str).collect();
+        let amounts_slice = self.recent_amounts.make_contiguous();
         let feature =
-            features::extract(&self.recent_amounts, &recipient_refs, self.prev_velocity_1m);
+            features::extract(amounts_slice, &recipient_refs, self.prev_velocity_1m);
         self.prev_velocity_1m = feature.velocity_1m;
 
         let point = vec![
@@ -143,7 +145,7 @@ impl AgentState {
         }
 
         self.last_anomaly_score = None;
-        let result = cold_start_check(&self.recent_amounts, amount);
+        let result = cold_start_check(self.recent_amounts.make_contiguous(), amount);
         (result, retrain_plan)
     }
 

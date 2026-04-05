@@ -42,7 +42,7 @@ export function Hero() {
           </h1>
           
           <p className="text-lg sm:text-xl text-muted-foreground max-w-2xl mx-auto leading-relaxed">
-            Secure your autonomous AI systems with cryptographic guardrails. Intercept, validate, and anchor agent decisions on-chain before they execute.
+            Secure your autonomous AI systems with real-time guardrails. Intercept, validate, and enforce every agent decision before it executes.
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
@@ -101,7 +101,7 @@ export function Hero() {
 
           <div className="flex items-center px-6 py-4 rounded-2xl border border-border bg-card/60 backdrop-blur-md shadow-lg w-full md:w-auto justify-center group hover:border-primary/30 transition-colors">
             <div className="w-3 h-3 rounded-full bg-purple-500 mr-3" />
-            <span className="font-semibold text-muted-foreground group-hover:text-foreground transition-colors">Blockchain</span>
+            <span className="font-semibold text-muted-foreground group-hover:text-foreground transition-colors">Audit Log</span>
           </div>
         </motion.div>
       </div>

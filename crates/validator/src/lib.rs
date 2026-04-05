@@ -572,7 +572,7 @@ impl AppState {
                     reason: Some(reason),
                     policy: Some("CIRCUIT_BREAKER".into()),
                     actions_this_minute: actions,
-                    rate_limit: MAX_ACTIONS_PER_MINUTE,
+                    rate_limit: cached.rate_limit,
                     deferred_scan_id: None,
                     capability_risk: None,
                     sig: None,
@@ -587,7 +587,7 @@ impl AppState {
                 reason: None,
                 policy: None,
                 actions_this_minute: actions,
-                rate_limit: MAX_ACTIONS_PER_MINUTE,
+                rate_limit: cached.rate_limit,
                 deferred_scan_id: None,
                 capability_risk: None,
                 sig: None,
@@ -915,7 +915,7 @@ impl AppState {
             .copied()
             .unwrap_or(DEFAULT_MAX_EWMA_VELOCITY);
         let current_ewma = agent.tracker.ewma_velocity();
-        if req.action.amount.is_some() && current_count >= 3 && current_ewma > max_ewma_velocity {
+        if req.action.amount.is_some() && current_count >= 1 && current_ewma > max_ewma_velocity {
             let reason = format!(
                 "EWMA velocity {:.2} exceeded limit {:.2}",
                 current_ewma, max_ewma_velocity
@@ -971,7 +971,7 @@ impl AppState {
             || req.metadata.get("reward_signal").is_some()
             || req.metadata.get("solution_steps").is_some()
             || req.metadata.get("task_difficulty").is_some();
-        let reward_stream = build_reward_stream(&agent.recent_amounts, reward_signal, task_progress);
+        let reward_stream = build_reward_stream(agent.recent_amounts.make_contiguous(), reward_signal, task_progress);
 
         if reward_context_enabled && reward_stream.len() >= 8 {
             let baseline_streams = build_baseline_streams(&reward_stream);
@@ -1308,7 +1308,10 @@ impl AppState {
 
         // 4. All checks passed — record and cache.
         // Quorum gate: high-stakes transactions require cluster agreement (ConsistencyOverAvailability).
-        let amount_cents = req.action.amount.map(|a| (a * 100.0) as u64).unwrap_or(0);
+        let amount_cents = req.action.amount.map(|a| {
+            let c = (a * 100.0).clamp(0.0, u64::MAX as f64);
+            c as u64
+        }).unwrap_or(0);
         let is_anomaly_flagged = anomaly_result
             .as_ref()
             .map(|r| r.is_anomaly)
@@ -1356,14 +1359,16 @@ impl AppState {
         let actions = agent.current_action_count();
 
         if req.action.amount.is_none() {
-            self.cache.insert(
+            self.cache.insert_for(
                 cache_key,
                 CachedDecision {
                     decision: "ALLOW".into(),
                     circuit_breaker_active: false,
                     reason: None,
                     policy: None,
+                    rate_limit: effective_rate_limit,
                 },
+                Some(&req.agent_id),
             );
         }
 
@@ -1375,7 +1380,7 @@ impl AppState {
             reason: None,
             policy: None,
             actions_this_minute: actions,
-            rate_limit: MAX_ACTIONS_PER_MINUTE,
+            rate_limit: effective_rate_limit,
             deferred_scan_id: None,
             capability_risk: cap_risk_value,
             sig: None,

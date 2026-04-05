@@ -1,13 +1,9 @@
 from __future__ import annotations
-
 import json
 import os
 import time
 from typing import Optional
-
 from .cache import CachedDecision, PolicyCache
-
-
 class RedisPolicyCache:
     """Redis-backed policy cache with AUTH support and optional encryption.
     
@@ -18,7 +14,6 @@ class RedisPolicyCache:
     - REDIS_SSL_CA_CERTS: Path to CA certificates for TLS verification
     - REDIS_ENCRYPTION_KEY: Base64-encoded key for cache value encryption
     """
-    
     def __init__(
         self,
         *,

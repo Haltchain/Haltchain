@@ -64,11 +64,28 @@ fn verify_password_hash(stored_hash: &str, password: &str) -> bool {
     false
 }
 
+/// Minimum password requirements for admin accounts.
+pub fn validate_password_strength(password: &str) -> Result<(), &'static str> {
+    if password.len() < 12 {
+        return Err("password must be at least 12 characters");
+    }
+    if !password.chars().any(|c| c.is_ascii_uppercase()) {
+        return Err("password must contain an uppercase letter");
+    }
+    if !password.chars().any(|c| c.is_ascii_lowercase()) {
+        return Err("password must contain a lowercase letter");
+    }
+    if !password.chars().any(|c| c.is_ascii_digit()) {
+        return Err("password must contain a digit");
+    }
+    Ok(())
+}
+
 pub fn hash_password(password: &str) -> String {
     let salt = SaltString::generate(&mut OsRng);
     Argon2::default()
         .hash_password(password.as_bytes(), &salt)
-        .expect("argon2 hash failed")
+        .expect("Argon2 hashing is infallible for valid salt")
         .to_string()
 }
 
@@ -83,6 +100,9 @@ pub async fn bootstrap_if_empty(pool: &PgPool) {
 
     match (email, password) {
         (Some(email), Some(password)) => {
+            if let Err(reason) = validate_password_strength(&password) {
+                tracing::warn!(email = %email, reason, "bootstrap admin password is weak");
+            }
             let hash = hash_password(&password);
             let result = sqlx::query(
                 "INSERT INTO admin_users (email, password_hash, is_active) VALUES ($1, $2, true)

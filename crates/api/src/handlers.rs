@@ -116,6 +116,18 @@ pub async fn validate(
         )
             .into_response();
     }
+    if req.agent_id.len() > 256
+        || !req
+            .agent_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "agent_id must be <= 256 chars, alphanumeric/dash/underscore/dot only" })),
+        )
+            .into_response();
+    }
 
     // api_key must travel in the X-API-Key header, never in the request body.
     let api_key = match headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
@@ -202,7 +214,7 @@ pub async fn validate(
     info!(agent_id = %req.agent_id, action = %req.action.action_type, "validate request");
 
     let response = state.validate(&req).await;
-    let _ = append_audit_event(json!({
+    if let Err(e) = append_audit_event(json!({
         "event": "validate",
         "agent_id": req.agent_id,
         "action_type": req.action.action_type,
@@ -210,7 +222,9 @@ pub async fn validate(
         "transaction_id": response.transaction_id,
         "request_nonce": wire.request_nonce,
         "request_sig": wire.request_sig,
-    }));
+    })) {
+        warn!(error = %e, "failed to append audit event");
+    }
     Json(response).into_response()
 }
 
@@ -253,8 +267,8 @@ async fn declare_goal(
         Err(e) => {
             tracing::error!(error = %e, agent_id = %req.agent_id, "embedding pipeline failure");
             return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "internal server error" })),
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "embedding service temporarily unavailable" })),
             )
                 .into_response();
         }
@@ -294,8 +308,15 @@ pub async fn drift_status(
     State(state): State<Arc<AppState>>,
     Path((agent_id, session_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if agent_id.trim().is_empty() || session_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "agent_id and session_id are required" })),
+        )
+            .into_response();
+    }
     info!(agent_id = %agent_id, session_id = %session_id, "drift status");
-    Json(state.drift_status(&agent_id, &session_id))
+    Json(state.drift_status(&agent_id, &session_id)).into_response()
 }
 
 pub async fn public_key(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -521,13 +542,19 @@ async fn risk_advisories_stream(
 
     let s = stream! {
         let mut last_id: i64 = -1;
+        let mut total_sent: u64 = 0;
+        const MAX_SSE_EVENTS: u64 = 10_000;
         loop {
+            if total_sent >= MAX_SSE_EVENTS {
+                break;
+            }
             let batch = state.list_risk_advisories(&agent_id, Some(last_id));
             for adv in &batch {
                 if adv.id > last_id {
                     last_id = adv.id;
                 }
                 if let Ok(data) = serde_json::to_string(adv) {
+                    total_sent += 1;
                     yield Ok::<Event, Infallible>(
                         Event::default().event("advisory").data(data),
                     );
@@ -735,11 +762,12 @@ async fn token_exchange(headers: HeaderMap) -> impl IntoResponse {
         .unwrap_or("api-key-holder");
     match issue_jwt_token(agent_id) {
         Ok(token) => {
-            let _ = append_audit_event(json!({
+            if let Err(e) = append_audit_event(json!({
                 "event": "token_exchange",
                 "agent_id": agent_id,
-                "authorization": format!("Bearer {}", token),
-            }));
+            })) {
+                warn!(error = %e, "failed to append audit event for token exchange");
+            }
             Json(json!({ "token": token, "expires_in": 900 })).into_response()
         }
         Err(msg) => (StatusCode::NOT_IMPLEMENTED, Json(json!({ "error": msg }))).into_response(),
@@ -906,8 +934,30 @@ async fn admin_abci_query(
 
 async fn admin_login(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(body): Json<AdminLoginRequest>,
 ) -> impl IntoResponse {
+    // Rate limit login attempts by IP to mitigate brute-force attacks.
+    let client_ip = headers
+        .get("x-forwarded-for")
+        .or_else(|| headers.get("x-real-ip"))
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(str::trim)
+        .unwrap_or("unknown");
+    {
+        use crate::auth::rate_limiter;
+        let limiter = rate_limiter();
+        // Use a dedicated key namespace for login attempts (stricter: 10 attempts/window).
+        if let Err(_) = limiter.check(&format!("login:{client_ip}"), None, None) {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(json!({ "error": "too many login attempts, try again later" })),
+            )
+                .into_response();
+        }
+    }
+
     let pool = match state.db.as_ref().map(|db| db.pool()) {
         Some(p) => p,
         None => {
@@ -1011,15 +1061,33 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/auth/admin/me", get(admin_me))
 }
 
+/// Maximum allowed request body size (10 MB).
+const MAX_BODY_SIZE: usize = 10 * 1024 * 1024;
+
 pub fn build_app(state: Arc<AppState>) -> Router {
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let allowed_origins = std::env::var("HALTCHAIN_CORS_ORIGINS")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let cors = if let Some(raw) = allowed_origins {
+        let origins: Vec<_> = raw
+            .split(',')
+            .filter_map(|s| s.trim().parse().ok())
+            .collect();
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    } else {
+        CorsLayer::new()
+            .allow_origin(Any)
+            .allow_methods(Any)
+            .allow_headers(Any)
+    };
 
     Router::new()
         .merge(api_routes())
         .nest("/v1", api_routes())
+        .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_SIZE))
         .layer(middleware::from_fn(rate_limit_middleware))
         .layer(middleware::from_fn(security_middleware))
         .layer(cors)

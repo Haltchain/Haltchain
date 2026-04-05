@@ -49,10 +49,11 @@ impl DriftWindow {
     }
     
     /// Cosine similarity between an action and the session's running centroid.
-    /// Returns 1.0 if no centroid available yet.
+    /// Returns 0.5 (uncertain) if no centroid available yet — avoids false
+    /// "perfect alignment" on the first action.
     pub fn centroid_similarity(&self, action: &[f64]) -> f64 {
         if self.action_count == 0 || self.action_sum.is_empty() {
-            return 1.0;
+            return 0.5;
         }
         let n = self.action_count as f64;
         let centroid: Vec<f64> = self.action_sum.iter().map(|s| s / n).collect();

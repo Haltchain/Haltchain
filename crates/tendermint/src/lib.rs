@@ -5,8 +5,9 @@ use chrono::Utc;
 use haltchain_validator::{AppState, Decision, ValidationRequest, ValidationResponse};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
+use tracing;
 
-// ─── Genesis Block ────────────────────────────────────────────────────────────
+//Genesis Block 
 
 /// A validator entry in the genesis validator set.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -196,6 +197,12 @@ impl TendermintBridge {
         &self.config.chain_id
     }
 
+    /// Return this node's numeric ID (1-indexed) in the validator set.
+    fn local_node_id(&self) -> u64 {
+        let local = std::env::var("HALTCHAIN_TM_NODE_ID").unwrap_or_else(|_| "1".to_string());
+        local.parse::<u64>().unwrap_or(1)
+    }
+
     /// Enforce production rollout requirements for BFT safety.
     ///
     /// Defaults:
@@ -272,19 +279,50 @@ impl TendermintBridge {
         let resp = self.state.validate(&req).await;
 
         if quorum_check.requires_quorum() {
-            // High-stakes: the consensus layer must have achieved 2-of-3 agreement
-            // before DeliverTx is called. Enforce that gate application-side as
-            // defense-in-depth by projecting the unanimous local decision through
-            // a QuorumTracker (all three validators see the same deterministic rule set).
+            // Single-node deployment: we cannot achieve real BFT consensus without
+            // multiple independent validators connected via the network. Log a
+            // warning and reject the high-stakes transaction when the cluster has
+            // not reached BFT readiness, rather than faking multi-node agreement.
+            let readiness = self.bft_readiness_report();
+            if !readiness.ready || self.config.validators.len() < 2 {
+                tracing::warn!(
+                    tx = %resp.transaction_id,
+                    validators = readiness.validator_count,
+                    "High-stakes tx requires BFT quorum but cluster is not ready — rejecting"
+                );
+                return Ok(DeliverTxResponse {
+                    code: 10,
+                    log: format!(
+                        "quorum unavailable: need {} validators across {} regions, \
+                         have {} validators across {} regions",
+                        readiness.min_validators,
+                        readiness.min_regions,
+                        readiness.validator_count,
+                        readiness.unique_regions,
+                    ),
+                    data: serde_json::json!({
+                        "decision": "DENY",
+                        "transaction_id": resp.transaction_id,
+                        "timestamp": resp.timestamp,
+                        "quorum": "Unavailable",
+                        "quorum_enforced": true,
+                        "reason": "BFT cluster not ready for high-stakes consensus",
+                    }),
+                });
+            }
+
+            // Multi-validator deployment: each validator runs identical
+            // deterministic logic, so the local decision projects 1:1 onto
+            // what the other validators will decide.  Record the local vote
+            // once — the Raft/consensus transport layer is responsible for
+            // collecting the remaining votes before commit.
             let mut tracker = QuorumTracker::new(&resp.transaction_id);
             let vote = if resp.decision == Decision::Allow {
                 Vote::Approve
             } else {
                 Vote::Reject
             };
-            for node_id in 1u64..=3 {
-                tracker.vote(node_id, vote.clone());
-            }
+            tracker.vote(self.local_node_id(), vote);
             let quorum = tracker.decision();
             let code = match (&resp.decision, &quorum) {
                 (_, QuorumDecision::Rejected) | (_, QuorumDecision::Unavailable) => 10,
