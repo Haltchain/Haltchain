@@ -1,0 +1,105 @@
+# PCI-DSS v4.0 Regulatory Rule Pack
+# Covers: Requirement 3 (protect stored account data), Requirement 6 (secure systems),
+# Requirement 7 (restrict access), Requirement 10 (logging), Requirement 11 (testing)
+version: "1"
+max_delegation_depth: 2
+
+rules:
+  #  Req 3.4: PAN Access Velocity Limit
+  - id: pci_pan_velocity
+    priority: safety
+    description: >
+      Rate-limit access to cardholder data. Excessive reads within 1 minute
+      indicate a potential breach or scraping attack (PCI-DSS Req 3.4).
+    condition:
+      field: actions_1m
+      op: gt
+      value: 5
+    action: circuit_break
+    message: "PCI-DSS Req 3.4 — Cardholder data access velocity exceeded"
+    depends_on: []
+
+  #  Req 7.1: Restrict Access by Need-to-Know
+  - id: pci_scope_creep
+    priority: safety
+    description: >
+      Deny when an agent requests scopes beyond its declared permissions.
+      Implements least-privilege access control (PCI-DSS Req 7.1).
+    condition:
+      field: accessing_undeclared_service
+      op: eq
+      value: true
+    action: deny
+    message: "PCI-DSS Req 7.1 — Agent accessing undeclared service; scope violation"
+    depends_on: []
+
+  #  Req 3.2: Do Not Store Sensitive Auth Data
+  - id: pci_pii_concentration
+    priority: compliance
+    description: >
+      Flag high PII concentration that may indicate sensitive authentication
+      data (SAD) or cardholder data being processed beyond necessity.
+    condition:
+      field: pii_field_count
+      op: gt
+      value: 3
+    action: flag
+    message: "PCI-DSS Req 3.2 — High cardholder data field count; verify SAD not stored"
+    depends_on: []
+
+  #  Req 6.3: Protect Against Known Vulnerabilities
+  - id: pci_anomaly_detection
+    priority: safety
+    description: >
+      Block requests with high anomaly scores that may indicate exploitation
+      of known vulnerabilities (PCI-DSS Req 6.3).
+    condition:
+      field: anomaly_score
+      op: gt
+      value: 0.85
+    action: deny
+    message: "PCI-DSS Req 6.3 — High anomaly score; potential vulnerability exploitation"
+    depends_on: []
+
+  #  Req 11.5: Network Intrusion Detection
+  - id: pci_lateral_movement
+    priority: safety
+    description: >
+      Detect lateral movement patterns where agents access services outside
+      their CDE boundary (PCI-DSS Req 11.5 / network segmentation).
+    condition:
+      field: accessing_undeclared_service
+      op: eq
+      value: true
+    action: circuit_break
+    message: "PCI-DSS Req 11.5 — Lateral movement detected outside CDE boundary"
+    depends_on: [pci_scope_creep]
+    disabled: true  # Enable when CDE boundary is configured
+
+  #  Req 10.2: Audit Trail for Sensitive Actions
+  - id: pci_high_value_flag
+    priority: compliance
+    description: >
+      Flag all transactions above $500 for enhanced audit logging.
+      Supports PCI-DSS Req 10.2 audit trail requirements.
+    condition:
+      field: amount
+      op: gt
+      value: 500.0
+    action: flag
+    message: "PCI-DSS Req 10.2 — High-value transaction flagged for audit trail"
+    depends_on: []
+
+  #  Req 3.1: Data Retention
+  - id: pci_retention_limit
+    priority: compliance
+    description: >
+      Enforce maximum data retention for cardholder data. PCI-DSS requires
+      retention policies with defined storage periods.
+    condition:
+      field: retention_days_requested
+      op: gt
+      value: 365
+    action: deny
+    message: "PCI-DSS Req 3.1 — Cardholder data retention exceeds 1-year limit"
+    depends_on: []

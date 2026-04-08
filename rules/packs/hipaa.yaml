@@ -1,0 +1,104 @@
+# HIPAA Regulatory Rule Pack
+# Covers: Privacy Rule (45 CFR 164.502), Security Rule (45 CFR 164.312),
+# Minimum Necessary Standard (45 CFR 164.502(b)), Audit Controls (45 CFR 164.312(b))
+version: "1"
+max_delegation_depth: 2
+
+rules:
+  #  45 CFR 164.502(b): Minimum Necessary Standard
+  - id: hipaa_minimum_necessary
+    priority: compliance
+    description: >
+      Enforce minimum necessary access — agents must not request more PHI
+      fields than required for their designated task.
+    condition:
+      field: pii_field_count
+      op: gt
+      value: 5
+    action: deny
+    message: "HIPAA 164.502(b) — PHI access exceeds minimum necessary threshold"
+    depends_on: []
+
+  #  45 CFR 164.502: PHI Concentration Alert
+  - id: hipaa_phi_concentration
+    priority: safety
+    description: >
+      Hard-block when PHI field count indicates bulk health data exfiltration.
+      Threshold of 15 fields triggers immediate circuit break.
+    condition:
+      field: pii_field_count
+      op: gt
+      value: 15
+    action: circuit_break
+    message: "HIPAA 164.502 — Critical PHI concentration; potential bulk exfiltration"
+    depends_on: []
+
+  #  45 CFR 164.312(a): Access Control
+  - id: hipaa_scope_violation
+    priority: safety
+    description: >
+      Deny access when agent requests capabilities beyond declared scope.
+      Implements technical access controls required by the Security Rule.
+    condition:
+      field: accessing_undeclared_service
+      op: eq
+      value: true
+    action: deny
+    message: "HIPAA 164.312(a) — Unauthorized access attempt; scope violation"
+    depends_on: []
+
+  #  45 CFR 164.312(b): Audit Controls
+  - id: hipaa_high_velocity_audit
+    priority: compliance
+    description: >
+      Flag high-velocity PHI access for enhanced audit logging. Required
+      for 21 CFR Part 11 electronic records compliance.
+    condition:
+      field: actions_1m
+      op: gt
+      value: 6
+    action: flag
+    message: "HIPAA 164.312(b) — High-velocity PHI access flagged for audit review"
+    depends_on: []
+
+  #  45 CFR 164.530(j): Retention Requirements
+  - id: hipaa_retention_enforcement
+    priority: compliance
+    description: >
+      HIPAA requires retention of documentation for 6 years from date of
+      creation or last effective date. Block excessive retention requests.
+    condition:
+      field: retention_days_requested
+      op: gt
+      value: 2190
+    action: deny
+    message: "HIPAA 164.530(j) — Retention period exceeds 6-year HIPAA maximum"
+    depends_on: []
+
+  #  45 CFR 164.528: Accounting of Disclosures
+  - id: hipaa_cross_border_block
+    priority: safety
+    description: >
+      Block PHI transfers to restricted jurisdictions. HIPAA requires
+      Business Associate Agreements for all PHI handlers.
+    condition:
+      field: cross_border_restricted
+      op: eq
+      value: true
+    action: deny
+    message: "HIPAA 164.528 — PHI transfer to unauthorized jurisdiction blocked"
+    depends_on: []
+
+  #  Anomaly Detection for PHI Systems
+  - id: hipaa_anomaly_alert
+    priority: safety
+    description: >
+      Circuit-break on high anomaly scores in PHI-processing systems.
+      Supports breach detection requirements under 45 CFR 164.308(a)(1).
+    condition:
+      field: anomaly_score
+      op: gt
+      value: 0.75
+    action: circuit_break
+    message: "HIPAA 164.308(a)(1) — Anomalous PHI access pattern; possible breach"
+    depends_on: []

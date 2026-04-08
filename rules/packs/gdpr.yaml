@@ -1,0 +1,106 @@
+# GDPR Regulatory Rule Pack
+# Covers: Article 5 (data minimisation), Article 17 (right to erasure),
+# Article 35 (DPIA triggers), Article 44-49 (cross-border transfers),
+# Article 5(1)(e) (storage limitation / retention)
+version: "1"
+max_delegation_depth: 3
+
+rules:
+  #  Article 5(1)(c): Data Minimisation
+  - id: gdpr_data_minimisation
+    priority: compliance
+    description: >
+      Block when agent requests more data columns than task-necessary.
+      Implements the principle of data minimisation (Art. 5(1)(c)).
+    condition:
+      field: pii_field_count
+      op: gt
+      value: 10
+    action: deny
+    message: "GDPR Art. 5(1)(c) — PII field count exceeds minimisation threshold"
+    depends_on: []
+
+  #  Article 17: Right to Erasure
+  - id: gdpr_erasure_block
+    priority: safety
+    description: >
+      Hard-block any data processing when a GDPR deletion request is active.
+      Processing during an active erasure request violates Art. 17.
+    condition:
+      field: gdpr_deletion_requested
+      op: eq
+      value: true
+    action: deny
+    message: "GDPR Art. 17 — Active deletion request; processing blocked"
+    depends_on: []
+
+  #  Article 44-49: Cross-Border Transfer Restriction
+  - id: gdpr_cross_border_transfer
+    priority: compliance
+    description: >
+      Deny transfers to jurisdictions without adequacy decisions or
+      appropriate safeguards (Art. 44-49).
+    condition:
+      field: cross_border_restricted
+      op: eq
+      value: true
+    action: deny
+    message: "GDPR Art. 44 — Cross-border transfer to restricted jurisdiction blocked"
+    depends_on: []
+
+  #  Article 35: DPIA Trigger
+  - id: gdpr_dpia_trigger
+    priority: compliance
+    description: >
+      Flag high-volume PII processing that requires a Data Protection
+      Impact Assessment (Art. 35). Threshold: >5 PII fields in a single action.
+    condition:
+      field: pii_field_count
+      op: gt
+      value: 5
+    action: flag
+    message: "GDPR Art. 35 — DPIA required: high PII concentration detected"
+    depends_on: []
+
+  #  Article 5(1)(e): Storage Limitation
+  - id: gdpr_retention_violation
+    priority: compliance
+    description: >
+      Deny requests that set retention beyond the maximum allowed period.
+      GDPR requires data to be kept no longer than necessary (Art. 5(1)(e)).
+      Default max: 2555 days (7 years).
+    condition:
+      field: retention_days_requested
+      op: gt
+      value: 2555
+    action: deny
+    message: "GDPR Art. 5(1)(e) — Retention period exceeds maximum allowed (7 years)"
+    depends_on: []
+
+  #  Payload PII Leak Detection
+  - id: gdpr_schema_pii_violation
+    priority: safety
+    description: >
+      Deny when outbound payload contains PII fields not declared in agent schema.
+      Undeclared PII exfiltration indicates a potential Art. 5(2) accountability failure.
+    condition:
+      field: payload_contains_pii
+      op: eq
+      value: true
+    action: deny
+    message: "GDPR Art. 5(2) — Undeclared PII in payload; accountability violation"
+    depends_on: [gdpr_data_minimisation]
+
+  #  High Velocity PII Access
+  - id: gdpr_velocity_flag
+    priority: safety
+    description: >
+      Flag rapid PII data access that may indicate automated scraping
+      or a compromised agent (supports Art. 32 security measures).
+    condition:
+      field: actions_1m
+      op: gt
+      value: 8
+    action: flag
+    message: "GDPR Art. 32 — High-velocity PII access detected; review recommended"
+    depends_on: []
