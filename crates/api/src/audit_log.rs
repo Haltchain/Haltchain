@@ -1,13 +1,17 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use base64::{Engine as _, engine::general_purpose};
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use chrono::Utc;
+use parking_lot::Mutex;
 use rand_core::{OsRng, RngCore};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 const DEFAULT_RETENTION_DAYS: i64 = 30;
 const DEFAULT_PRUNE_INTERVAL_SECS: u64 = 3600;
@@ -90,8 +94,12 @@ pub fn append_audit_event(mut event: Value) -> Result<(), String> {
         event["logged_at"] = Value::String(Utc::now().to_rfc3339());
     }
     redact_json(&mut event);
-    let line = serde_json::to_vec(&event).map_err(|e| format!("json encode error: {e}"))?;
-    let b64 = encrypt_line(&line)?;
+
+    // Extend the hash chain: H(canonical_json || prev_hash).
+    let canonical = serde_json::to_vec(&event).map_err(|e| format!("json encode error: {e}"))?;
+    AuditChain::global().push(&canonical);
+
+    let b64 = encrypt_line(&canonical)?;
     append_encrypted_line(&b64)
 }
 
@@ -226,6 +234,99 @@ fn prune_expired_audit_events_with_cutoff(cutoff_ts: i64) -> Result<PruneReport,
 /// Maximum lines to load from the audit log file at once.
 const MAX_AUDIT_LOG_LINES: usize = 500_000;
 
+/// Filters for `query_audit_events`.
+#[derive(Debug, Default)]
+pub struct AuditQueryFilter {
+    /// Inclusive lower bound (epoch seconds).
+    pub time_from: Option<i64>,
+    /// Inclusive upper bound (epoch seconds).
+    pub time_to: Option<i64>,
+    /// Match events whose `agent_id` field equals this value.
+    pub agent_id: Option<String>,
+    /// Match events whose `decision` field equals this value (e.g. `"DENY"`).
+    pub decision: Option<String>,
+    /// Maximum number of events to return (newest-first). Defaults to 100.
+    pub limit: usize,
+}
+
+/// Structured result from `query_audit_events`.
+#[derive(Debug)]
+pub struct AuditQueryResult {
+    pub events: Vec<Value>,
+    /// Total events scanned (before filtering).
+    pub scanned: usize,
+}
+
+/// Query the encrypted audit log with optional time-range, agent, and decision filters.
+///
+/// Scans up to `MAX_AUDIT_LOG_LINES` lines, newest-first, and returns matching
+/// events up to `filter.limit`.  All filter comparisons are case-insensitive for
+/// decision and exact-match for agent_id.
+pub fn query_audit_events(filter: &AuditQueryFilter) -> Result<AuditQueryResult, String> {
+    let limit = if filter.limit == 0 { 100 } else { filter.limit };
+    let path = log_path();
+    let file = File::open(&path).map_err(|e| format!("open log file failed: {e}"))?;
+
+    let lines: Vec<String> = BufReader::new(file)
+        .lines()
+        .take(MAX_AUDIT_LOG_LINES)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("read log failed: {e}"))?;
+
+    let scanned = lines.len();
+    let key = encryption_key()?;
+    let cipher = XChaCha20Poly1305::new(&key);
+    let mut out = Vec::new();
+
+    for line in lines.into_iter().rev() {
+        if out.len() >= limit {
+            break;
+        }
+        let Some(event) = decrypt_line(&line, &cipher) else {
+            continue;
+        };
+
+        // ── time_from filter ──────────────────────────────────────────────────
+        if let Some(from) = filter.time_from {
+            match parse_logged_at_epoch(&event) {
+                Some(ts) if ts >= from => {}
+                _ => continue,
+            }
+        }
+
+        // ── time_to filter ────────────────────────────────────────────────────
+        if let Some(to) = filter.time_to {
+            match parse_logged_at_epoch(&event) {
+                Some(ts) if ts <= to => {}
+                _ => continue,
+            }
+        }
+
+        // ── agent_id filter ───────────────────────────────────────────────────
+        if let Some(ref agent_filter) = filter.agent_id {
+            match event.get("agent_id").and_then(Value::as_str) {
+                Some(aid) if aid == agent_filter.as_str() => {}
+                _ => continue,
+            }
+        }
+
+        // ── decision filter ───────────────────────────────────────────────────
+        if let Some(ref decision_filter) = filter.decision {
+            match event.get("decision").and_then(Value::as_str) {
+                Some(d) if d.eq_ignore_ascii_case(decision_filter.as_str()) => {}
+                _ => continue,
+            }
+        }
+
+        out.push(event);
+    }
+
+    Ok(AuditQueryResult {
+        events: out,
+        scanned,
+    })
+}
+
 pub fn read_recent_audit_events(limit: usize) -> Result<Vec<Value>, String> {
     let path = log_path();
     let file = File::open(path).map_err(|e| format!("open log file failed: {e}"))?;
@@ -252,14 +353,97 @@ pub fn read_recent_audit_events(limit: usize) -> Result<Vec<Value>, String> {
     Ok(out)
 }
 
+// Audit Log Hash Chain
+
+/// Sequential hash chain over audit log entries.
+///
+/// Every entry's hash is `SHA-256(canonical_json || prev_hash)` where `prev_hash`
+/// is the hash of the preceding entry (or 32 zero bytes for the first entry).
+/// Tampering with any entry breaks the chain from that point forward.
+pub struct AuditChain {
+    inner: Mutex<ChainInner>,
+}
+
+struct ChainInner {
+    /// Hash of the most recent entry (head of the chain).
+    head: [u8; 32],
+    /// Total entries appended since process start.
+    count: u64,
+}
+
+/// Snapshot of the audit chain state.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuditChainStatus {
+    /// Hex-encoded hash of the most recent entry.
+    pub head_hex: String,
+    /// Total entries since process start.
+    pub entries: u64,
+}
+
+fn sha256_audit(data: &[u8]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(data);
+    h.finalize().into()
+}
+
+impl AuditChain {
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(ChainInner {
+                head: [0u8; 32],
+                count: 0,
+            }),
+        }
+    }
+
+    pub fn global() -> &'static AuditChain {
+        static INSTANCE: OnceLock<AuditChain> = OnceLock::new();
+        INSTANCE.get_or_init(AuditChain::new)
+    }
+
+    /// Hash the canonical entry bytes with the current chain head and advance.
+    pub fn push(&self, canonical_json: &[u8]) {
+        let mut inner = self.inner.lock();
+        let mut preimage = Vec::with_capacity(canonical_json.len() + 32);
+        preimage.extend_from_slice(canonical_json);
+        preimage.extend_from_slice(&inner.head);
+        inner.head = sha256_audit(&preimage);
+        inner.count += 1;
+    }
+
+    /// Current chain status.
+    pub fn status(&self) -> AuditChainStatus {
+        let inner = self.inner.lock();
+        AuditChainStatus {
+            head_hex: hex::encode(inner.head),
+            entries: inner.count,
+        }
+    }
+
+    /// Verify a sequence of canonical JSON entries against an expected chain.
+    ///
+    /// `entries` must be in append order. Returns `Ok(head_hex)` with the
+    /// resulting chain head if the replay succeeds.
+    pub fn verify_sequence(entries: &[Vec<u8>], initial_head: [u8; 32]) -> String {
+        let mut head = initial_head;
+        for entry in entries {
+            let mut preimage = Vec::with_capacity(entry.len() + 32);
+            preimage.extend_from_slice(entry);
+            preimage.extend_from_slice(&head);
+            head = sha256_audit(&preimage);
+        }
+        hex::encode(head)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Mutex as StdMutex, OnceLock as StdOnceLock};
 
-    fn env_lock() -> &'static Mutex<()> {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        ENV_LOCK.get_or_init(|| Mutex::new(()))
+    fn env_lock() -> &'static StdMutex<()> {
+        static ENV_LOCK: StdOnceLock<StdMutex<()>> = StdOnceLock::new();
+        ENV_LOCK.get_or_init(|| StdMutex::new(()))
     }
 
     #[test]
@@ -318,5 +502,47 @@ mod tests {
             std::env::remove_var("HALTCHAIN_AUDIT_LOG_PATH");
             std::env::remove_var("HALTCHAIN_LOG_ENCRYPTION_KEY_HEX");
         }
+    }
+
+    #[test]
+    fn audit_chain_sequential_hashing() {
+        let chain = AuditChain::new();
+        assert_eq!(chain.status().entries, 0);
+        assert_eq!(chain.status().head_hex, "0".repeat(64));
+
+        chain.push(b"event-1");
+        let h1 = chain.status().head_hex.clone();
+        assert_ne!(h1, "0".repeat(64));
+        assert_eq!(chain.status().entries, 1);
+
+        chain.push(b"event-2");
+        let h2 = chain.status().head_hex.clone();
+        assert_ne!(h2, h1, "head must advance");
+        assert_eq!(chain.status().entries, 2);
+    }
+
+    #[test]
+    fn audit_chain_verify_sequence() {
+        let entries: Vec<Vec<u8>> = vec![b"alpha".to_vec(), b"bravo".to_vec(), b"charlie".to_vec()];
+        let result = AuditChain::verify_sequence(&entries, [0u8; 32]);
+
+        // Verify produces the same head as pushing individually.
+        let chain = AuditChain::new();
+        for e in &entries {
+            chain.push(e);
+        }
+        assert_eq!(result, chain.status().head_hex);
+    }
+
+    #[test]
+    fn audit_chain_deterministic() {
+        let a = AuditChain::new();
+        let b = AuditChain::new();
+        for i in 0..10 {
+            let payload = format!("entry-{i}");
+            a.push(payload.as_bytes());
+            b.push(payload.as_bytes());
+        }
+        assert_eq!(a.status().head_hex, b.status().head_hex);
     }
 }
