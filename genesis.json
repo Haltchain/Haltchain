@@ -5,19 +5,19 @@
   "validators": [
     {
       "node_id": "node1",
-      "pub_key_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+      "pub_key_b64": "iojj3XQJ8ZX9UtstPLpdcspnCb8dlBIb83SIAbQPb1w=",
       "power": 10,
       "region": "us-east-1"
     },
     {
       "node_id": "node2",
-      "pub_key_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE=",
+      "pub_key_b64": "gTl3Dqh9F19Wo1Rmw0x+zMuNipG07jeiXfYPW4/Js5Q=",
       "power": 10,
       "region": "eu-west-1"
     },
     {
       "node_id": "node3",
-      "pub_key_b64": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAI=",
+      "pub_key_b64": "7UkoxijRwsbq6QM4kFmVYSlZJzpcY/k2NsFGFKyHN9E=",
       "power": 10,
       "region": "ap-southeast-1"
     }

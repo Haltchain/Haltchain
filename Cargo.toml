@@ -7,7 +7,7 @@ edition = "2024"
 
 
 [workspace]
-members = ["crates/*", "crates/anchor"]
+members = ["crates/*", "crates/anchor", "haltchain-operator"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -47,3 +47,5 @@ argon2         = "0.5"
 bcrypt         = "0.15"
 async-stream   = "0.3"
 futures-util   = "0.3"
+clap           = { version = "4", features = ["derive"] }
+semver         = { version = "1", features = ["serde"] }
