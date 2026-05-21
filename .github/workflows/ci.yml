@@ -73,12 +73,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: test
     env:
-      HALTCHAIN_ADMIN_KEYS: ${{ secrets.HALTCHAIN_ADMIN_KEYS }},
-      
+      HALTCHAIN_ADMIN_KEYS: ${{ secrets.HALTCHAIN_ADMIN_KEYS }}
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: haltchain_test
           POSTGRES_USER: haltchain
@@ -98,14 +97,27 @@ jobs:
         env:
           PGPASSWORD: haltchain
         run: |
-          psql -h localhost -U haltchain -d haltchain_test -f migrations/001_decisions_and_feedback.sql
-          psql -h localhost -U haltchain -d haltchain_test -f migrations/002_compliance_resource_domains.sql
+          for f in \
+            migrations/001_decisions_and_feedback.sql \
+            migrations/002_compliance_resource_domains.sql \
+            migrations/003_adjustment_recommendations.sql \
+            migrations/004_capability_trajectory.sql \
+            migrations/005_admin_users.sql \
+            migrations/006_create_partitions.sql \
+            migrations/007_pgvector_embeddings.sql \
+            migrations/008_hash_chaining.sql \
+            migrations/009_phase1b_pg_native.sql \
+            migrations/010_phase1b_runtime_reliability_fixes.sql \
+            migrations/011_tenant_isolation_hardening.sql; do
+            psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
+          done
       - name: Build API
         run: cargo build -p haltchain-api --release
       - name: Start validator API
         env:
           DATABASE_URL: postgres://haltchain:haltchain@localhost/haltchain_test
           PORT: 8080
+          HALTCHAIN_EMBEDDING_TIER: developer
         run: |
           ./target/release/haltchain-api &
           echo "SERVER_PID=$!" >> "$GITHUB_ENV"
@@ -124,28 +136,186 @@ jobs:
           HALTCHAIN_CONTRACT_URL: http://localhost:8080
           HALTCHAIN_CONTRACT_API_KEY: dev-key
         run: pytest sdk/python/tests/test_contract.py -v
+      - name: Replay validate corpus
+        env:
+          HALTCHAIN_CORPUS_URL: http://localhost:8080
+          HALTCHAIN_CORPUS_API_KEY: dev-key
+        run: python scripts/replay_validate_corpus.py fixtures/validate_corpus.jsonl
       - name: Stop validator API
         if: always()
         run: kill "$SERVER_PID" 2>/dev/null || true
 
-  #Benchmark (p99 gate) 
-  bench:
-    name: Benchmark (configurable p99 gate)
+  frontend-smoke:
+    name: Frontend smoke (BFF + API)
     runs-on: ubuntu-latest
-    needs: sdk-contract
+    needs: [test]
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: haltchain_test
+          POSTGRES_USER: haltchain
+          POSTGRES_PASSWORD: haltchain
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-
-      - name: Run benchmark harness
+      - name: Apply schema migrations
         env:
-          HALTCHAIN_BENCH_P99_TARGET_US: "1500"
-        run: cargo run -p haltchain-bench --release
+          PGPASSWORD: haltchain
+        run: |
+          for f in \
+            migrations/001_decisions_and_feedback.sql \
+            migrations/002_compliance_resource_domains.sql \
+            migrations/003_adjustment_recommendations.sql \
+            migrations/004_capability_trajectory.sql \
+            migrations/005_admin_users.sql \
+            migrations/006_create_partitions.sql \
+            migrations/007_pgvector_embeddings.sql \
+            migrations/008_hash_chaining.sql \
+            migrations/009_phase1b_pg_native.sql \
+            migrations/010_phase1b_runtime_reliability_fixes.sql \
+            migrations/011_tenant_isolation_hardening.sql; do
+            psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
+          done
+      - name: Build API
+        run: cargo build -p haltchain-api --release
+      - name: Start validator API
+        env:
+          DATABASE_URL: postgres://haltchain:haltchain@localhost/haltchain_test
+          PORT: 8080
+          HALTCHAIN_EMBEDDING_TIER: developer
+          HALTCHAIN_BOOTSTRAP_ADMIN_EMAIL: ci-smoke@haltchain.local
+          HALTCHAIN_BOOTSTRAP_ADMIN_PASSWORD: TestSmokeCi1!LongEnough
+        run: |
+          ./target/release/haltchain-api &
+          echo "API_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 20); do
+            curl -sf http://localhost:8080/health && break || sleep 2
+          done
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm install
+      - name: Start frontend BFF
+        working-directory: frontend
+        env:
+          FRONTEND_PORT: "3000"
+          HALTCHAIN_API_URL: http://127.0.0.1:8080
+          NODE_ENV: development
+        run: |
+          node ./server.js &
+          echo "FE_PID=$!" >> "$GITHUB_ENV"
+          for i in $(seq 1 20); do
+            curl -sf http://127.0.0.1:3000/api/health && break || sleep 2
+          done
+      - name: Run smoke-e2e
+        working-directory: frontend
+        env:
+          SMOKE_API_BASE_URL: http://127.0.0.1:3000
+          SMOKE_ADMIN_EMAIL: ci-smoke@haltchain.local
+          SMOKE_ADMIN_PASSWORD: TestSmokeCi1!LongEnough
+        run: node ./scripts/smoke-e2e.mjs
+      - name: Stop servers
+        if: always()
+        run: |
+          kill "$FE_PID" 2>/dev/null || true
+          kill "$API_PID" 2>/dev/null || true
+
+  bench:
+    name: Benchmark Gate (${{ matrix.gate.name }})
+    runs-on: ubuntu-latest
+    needs: [sdk-contract, frontend-smoke]
+    strategy:
+      fail-fast: false
+      matrix:
+        gate:
+          - name: mixed-p99
+            kind: mixed
+          - name: cache-hit-p99
+            kind: cache
+          - name: unlogged-write-p95
+            kind: unlogged
+          - name: pgvector-search-p99
+            kind: pgvector
+    env:
+      DATABASE_URL: postgres://haltchain:haltchain@localhost/haltchain_test
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: haltchain_test
+          POSTGRES_USER: haltchain
+          POSTGRES_PASSWORD: haltchain
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Apply schema migrations
+        if: matrix.gate.kind == 'unlogged' || matrix.gate.kind == 'pgvector'
+        env:
+          PGPASSWORD: haltchain
+        run: |
+          for f in \
+            migrations/001_decisions_and_feedback.sql \
+            migrations/002_compliance_resource_domains.sql \
+            migrations/003_adjustment_recommendations.sql \
+            migrations/004_capability_trajectory.sql \
+            migrations/005_admin_users.sql \
+            migrations/006_create_partitions.sql \
+            migrations/007_pgvector_embeddings.sql \
+            migrations/008_hash_chaining.sql \
+            migrations/009_phase1b_pg_native.sql \
+            migrations/010_phase1b_runtime_reliability_fixes.sql \
+            migrations/011_tenant_isolation_hardening.sql; do
+            psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
+          done
+
+      - name: Run benchmark gate
+        run: |
+          case "${{ matrix.gate.kind }}" in
+            mixed)
+              HALTCHAIN_BENCH_P99_TARGET_US="1000" \
+              cargo run -p haltchain-bench --release --bin bench
+              ;;
+            cache)
+              HALTCHAIN_BENCH_CACHE_HIT_P99_TARGET_US="1000" \
+              cargo run -p haltchain-bench --release --bin cache_hit_gate
+              ;;
+            unlogged)
+              HALTCHAIN_BENCH_UNLOGGED_WRITE_P95_TARGET_US="10" \
+              cargo run -p haltchain-bench --release --bin unlogged_write_gate
+              ;;
+            pgvector)
+              HALTCHAIN_BENCH_PGVECTOR_P99_TARGET_US="2000" \
+              cargo run -p haltchain-bench --release --bin pgvector_gate
+              ;;
+            *)
+              echo "unknown benchmark gate" >&2
+              exit 2
+              ;;
+          esac
 
   #Security audit 
   audit:
-    name: Security audit (cargo-audit)
+    name: Security audit (cargo-audit + trivy)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -155,5 +325,22 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --quiet
 
-      - name: Audit dependencies
+      - name: Audit Rust dependencies (RUSTSEC advisories)
         run: cargo audit
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+          echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" \
+            | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update -qq && sudo apt-get install -y trivy
+
+      - name: Trivy filesystem scan (CRITICAL/HIGH only, fail on CRITICAL)
+        run: |
+          trivy fs . \
+            --severity CRITICAL,HIGH \
+            --exit-code 1 \
+            --ignore-unfixed \
+            --skip-dirs target \
+            --format table
