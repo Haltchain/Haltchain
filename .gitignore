@@ -24,10 +24,14 @@
 /sdk/python/.venv/*
 venv/
 .venv/
+.venv-ci/
 env/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# ONNX / local model weights (use scripts/download_arctic_onnx.sh)
+/models/
 
 # Packaging/build
 /dist/
@@ -87,3 +91,8 @@ frontend/.env*
 
 /*.sh
 *.sh
+
+sdk/typescript/node_modules/
+scripts/
+
+Documents/*
