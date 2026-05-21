@@ -249,9 +249,13 @@ cargo build --workspace
 
 ## Testing
 
+End-to-end testing story (frontend BFF → API → cognitive/embeddings/rules) and CI gates are documented in **[Documents/TestingFlow.md](Documents/TestingFlow.md)**.
+
 ```bash
 cargo test --workspace
 ```
+
+SDK/API contract tests (need a running API + Postgres): see `sdk-contract` in [`.github/workflows/ci.yml`](.github/workflows/ci.yml). Corpus replay against `POST /validate`: [scripts/replay_validate_corpus.py](scripts/replay_validate_corpus.py) and [fixtures/validate_corpus.jsonl](fixtures/validate_corpus.jsonl).
 
 ---
 
@@ -286,16 +290,21 @@ The default SDK install stays lightweight (`pip install ./sdk/python`) and produ
 
 ---
 
-## Deployment (Fly.io)
+## Deployment
 
-The validator is deployed as a 3-node Raft cluster on Fly.io (`haltchain-consensus.fly.dev`).
+Use the maintained container paths for local and testnet environments.
 
 ```bash
-fly deploy
+docker compose up -d
 ```
 
-The server binds to `PORT` (Fly.io injects `8080`), matching `internal_port = 8080` in `fly.toml`.
-Health checks hit `GET /health` every 15 seconds with a 30-second grace period on startup.
+For the multi-node local testnet profile:
+
+```bash
+docker compose -f docker-compose.testnet.yml up -d
+```
+
+The server binds to `PORT` when provided and defaults to `8080`.
 
 ---
 
