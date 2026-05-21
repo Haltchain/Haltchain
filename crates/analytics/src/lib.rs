@@ -1,13 +1,11 @@
-//! Week 2 — Monday: EWMA velocity tracker + sliding-window statistics.
+//! EWMA velocity tracker + sliding-window statistics.
 //!
 //! Uses exponential weighted moving average (EWMA) for velocity — more
 //! sensitive to recent spikes than a simple rolling window.
 
 pub mod auth;
-pub mod causal_testing;
 pub mod features;
 pub mod isolation_forest;
-pub mod reward_monitoring;
 pub mod spc;
 
 use std::time::{Duration, Instant};

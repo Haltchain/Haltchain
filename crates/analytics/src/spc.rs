@@ -1,4 +1,4 @@
-//! Section 7.2: Statistical Process Control (SPC)
+//! Statistical Process Control (SPC)
 //!
 //! Implements:
 //! - Population Stability Index (PSI)
@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Statistical Process Control monitor (Section 7.2)
-/// 
+///
 /// Combines PSI, EWMA, and KS test for comprehensive stability monitoring
 #[derive(Debug, Clone)]
 pub struct SpcMonitor {
@@ -55,7 +55,7 @@ pub struct Distribution {
 }
 
 /// EWMA tracker with control limits (Section 7.2)
-/// 
+///
 /// Extends the base Ewma from crate root with control limit functionality
 #[derive(Debug, Clone)]
 pub struct EwmaTracker {
@@ -95,18 +95,23 @@ impl SpcMonitor {
         }
     }
 
-    /// Population Stability Index (Section 7.2)
-    /// 
+    /// Population Stability Index
+    ///
     /// Measures distribution shift between current and expected distributions.
     /// PSI < 0.1: Stable, 0.1-0.25: Investigate, >0.25: Action Required
     pub fn calculate_psi(&self, current: &Distribution, expected: &Distribution) -> PsiResult {
         let mut psi = 0.0f32;
-        
-        for (_i, (curr, exp)) in current.bins().iter().zip(expected.bins().iter()).enumerate() {
+
+        for (_i, (curr, exp)) in current
+            .bins()
+            .iter()
+            .zip(expected.bins().iter())
+            .enumerate()
+        {
             // Avoid division by zero and log(0)
             let exp_safe = exp.max(1e-10);
             let curr_safe = curr.max(1e-10);
-            
+
             if *exp > 0.0 && *curr > 0.0 {
                 // PSI formula: sum((Actual - Expected) * ln(Actual / Expected))
                 let contribution = (curr_safe - exp_safe) * (curr_safe / exp_safe).ln();
@@ -142,7 +147,7 @@ impl SpcMonitor {
     }
 
     /// Kolmogorov-Smirnov two-sample test
-    /// 
+    ///
     /// Tests whether two samples come from the same distribution.
     /// Returns true if distributions are significantly different.
     pub fn ks_test(&self, sample1: &[f64], sample2: &[f64]) -> KsResult {
@@ -209,7 +214,7 @@ impl SpcMonitor {
     fn kolmogorov_p_value(d: f64, n1: f64, n2: f64) -> f64 {
         let n = (n1 * n2) / (n1 + n2);
         let lambda = (n.sqrt() + 0.12 + 0.11 / n.sqrt()) * d;
-        
+
         // Smirnov approximation for two-tailed test
         let mut sum = 0.0;
         for i in 1..=100 {
@@ -223,7 +228,7 @@ impl SpcMonitor {
                 break;
             }
         }
-        
+
         (2.0 * sum).min(1.0).max(0.0)
     }
 }
@@ -240,15 +245,15 @@ impl Distribution {
         // Normalize to sum to 1.0
         let sum: f32 = bins.iter().sum();
         let normalized: Vec<f32> = bins.iter().map(|b| b / sum).collect();
-        
+
         Self {
             bins: normalized,
             bin_edges,
         }
     }
 
-    /// Create from raw samples using percentile-based binning (Section 7.3)
-    /// 
+    /// Create from raw samples using percentile-based binning
+    ///
     /// Uses decile-based bins to ensure proper distribution separation
     pub fn from_samples(samples: &[f64], num_bins: usize) -> Self {
         if samples.is_empty() {
@@ -260,11 +265,11 @@ impl Distribution {
 
         let mut sorted = samples.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        
+
         let min = sorted[0];
         let max = sorted[sorted.len() - 1];
         let range = max - min;
-        
+
         if range < 1e-10 {
             // All values are the same
             return Self {
@@ -276,7 +281,7 @@ impl Distribution {
         // Use percentile-based bin edges to ensure even distribution
         let mut bin_edges = Vec::with_capacity(num_bins + 1);
         bin_edges.push(min as f32);
-        
+
         for i in 1..num_bins {
             let percentile = i as f64 / num_bins as f64;
             let idx = (percentile * (sorted.len() - 1) as f64) as usize;
@@ -286,7 +291,7 @@ impl Distribution {
 
         Self::from_samples_with_edges(samples, &bin_edges)
     }
-    
+
     /// Create distribution using pre-defined bin edges (for shared binning)
     pub fn from_samples_with_edges(samples: &[f64], bin_edges: &[f32]) -> Self {
         let num_bins = bin_edges.len().saturating_sub(1);
@@ -298,7 +303,7 @@ impl Distribution {
         }
 
         let mut bins = vec![0.0f32; num_bins];
-        
+
         for &sample in samples {
             // Find bin by checking edges
             let mut bin_idx = 0;
@@ -320,8 +325,8 @@ impl Distribution {
             }
         }
 
-        Self { 
-            bins, 
+        Self {
+            bins,
             bin_edges: bin_edges.to_vec(),
         }
     }
@@ -337,7 +342,7 @@ impl Distribution {
 
 impl EwmaTracker {
     /// Create new EWMA tracker with control limits
-    /// 
+    ///
     /// * `alpha` - Smoothing parameter (0, 1]
     /// * `target` - Target/process mean
     /// * `sigma` - Process standard deviation
@@ -366,19 +371,19 @@ impl EwmaTracker {
     }
 
     /// Calculate control limits
-    /// 
+    ///
     /// Returns (upper_limit, lower_limit) for given sigma multiplier
     pub fn control_limits(&self, sigma_multiplier: f64) -> (f64, f64) {
         // Alpha is stored in self.alpha
-        
+
         // Variance of EWMA: sigma^2 * alpha / (2 - alpha)
         let var_ewma = self.sigma * self.sigma * self.alpha / (2.0 - self.alpha);
         let std_ewma = var_ewma.sqrt();
-        
+
         let margin = sigma_multiplier * std_ewma;
         let upper = self.target + margin;
         let lower = self.target - margin;
-        
+
         (upper, lower)
     }
 
@@ -391,7 +396,7 @@ impl EwmaTracker {
     pub fn alert_status_with_sigma(&self, sigma_multiplier: f64) -> AlertStatus {
         let ewma_val = self.value();
         let (upper, lower) = self.control_limits(sigma_multiplier);
-        
+
         if ewma_val > upper || ewma_val < lower {
             AlertStatus::OutOfControl
         } else {
@@ -423,7 +428,7 @@ impl EwmaTracker {
 pub fn calculate_psi(current: &[f64], expected: &[f64], num_bins: usize) -> f32 {
     let dist_current = Distribution::from_samples(current, num_bins);
     let dist_expected = Distribution::from_samples(expected, num_bins);
-    
+
     let monitor = SpcMonitor::new();
     monitor.calculate_psi(&dist_current, &dist_expected).psi
 }
@@ -443,10 +448,10 @@ mod tests {
         // Two identical distributions should have PSI = 0
         let dist1 = Distribution::from_samples(&[1.0, 2.0, 3.0, 4.0, 5.0], 5);
         let dist2 = Distribution::from_samples(&[1.0, 2.0, 3.0, 4.0, 5.0], 5);
-        
+
         let monitor = SpcMonitor::new();
         let result = monitor.calculate_psi(&dist1, &dist2);
-        
+
         println!("PSI for identical distributions: {:.4}", result.psi);
         assert_eq!(result.stability, Stability::Stable);
         assert!(!result.drift_detected);
@@ -458,63 +463,72 @@ mod tests {
         // Create larger samples for more reliable PSI calculation
         let samples1: Vec<f64> = (0..100).map(|i| i as f64 * 0.1).collect(); // 0.0 to 9.9
         let samples2: Vec<f64> = (0..100).map(|i| 50.0 + i as f64 * 0.1).collect(); // 50.0 to 59.9
-        
+
         // Use shared binning: combine all samples to create common bins
         let all_samples: Vec<f64> = samples1.iter().chain(&samples2).copied().collect();
         let combined_dist = Distribution::from_samples(&all_samples, 10);
         let shared_edges = combined_dist.bin_edges();
-        
+
         // Now create both distributions using shared bin edges
         let dist1 = Distribution::from_samples_with_edges(&samples1, shared_edges);
         let dist2 = Distribution::from_samples_with_edges(&samples2, shared_edges);
-        
+
         let monitor = SpcMonitor::new();
         let result = monitor.calculate_psi(&dist1, &dist2);
-        
+
         println!("PSI for different distributions: {:.4}", result.psi);
         println!("Dist1 bins: {:?}", dist1.bins());
         println!("Dist2 bins: {:?}", dist2.bins());
         println!("Shared edges: {:?}", shared_edges);
-        
+
         // These distributions are completely separated - PSI should be high
-        assert!(result.psi > 0.1, 
-            "PSI should detect distribution drift (>0.1), got {:.4}", result.psi);
+        assert!(
+            result.psi > 0.1,
+            "PSI should detect distribution drift (>0.1), got {:.4}",
+            result.psi
+        );
         assert!(result.drift_detected, "Should flag as drift detected");
-        assert_eq!(result.stability, Stability::ActionRequired, 
-            "Should require action for such different distributions");
+        assert_eq!(
+            result.stability,
+            Stability::ActionRequired,
+            "Should require action for such different distributions"
+        );
     }
 
     #[test]
     fn test_ewma_tracker() {
         let mut tracker = EwmaTracker::new(0.3, 10.0, 1.0);
-        
+
         // Feed values around target
         for _ in 0..20 {
             tracker.update(10.0);
             tracker.update(10.1);
             tracker.update(9.9);
         }
-        
+
         assert_eq!(tracker.alert_status(), AlertStatus::InControl);
-        
+
         // Feed extreme value
         tracker.update(20.0);
-        
+
         let status = tracker.alert_status();
         println!("Alert status after outlier: {:?}", status);
-        // May or may not trigger depending on alpha and values
+        assert!(
+            !matches!(status, AlertStatus::InControl),
+            "EWMA tracker must detect a 10-sigma outlier (20.0 vs target 10.0)"
+        );
     }
 
     #[test]
     fn test_ks_test_identical() {
         let sample1 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
         let sample2 = vec![1.0, 2.0, 3.0, 4.0, 5.0];
-        
+
         let result = ks_test(&sample1, &sample2);
-        
+
         println!("KS statistic (identical): {:.4}", result.statistic);
         println!("P-value: {:.4}", result.p_value);
-        
+
         assert!(!result.significant); // Should not be significantly different
     }
 
@@ -522,13 +536,13 @@ mod tests {
     fn test_ks_test_different() {
         let sample1: Vec<f64> = (0..100).map(|i| i as f64).collect();
         let sample2: Vec<f64> = (50..150).map(|i| i as f64).collect();
-        
+
         let result = ks_test(&sample1, &sample2);
-        
+
         println!("KS statistic (different): {:.4}", result.statistic);
         println!("P-value: {:.4}", result.p_value);
         println!("Significant: {}", result.significant);
-        
+
         assert!(result.significant); // Should be significantly different
     }
 
@@ -536,10 +550,10 @@ mod tests {
     fn test_distribution_from_samples() {
         let samples = vec![1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0];
         let dist = Distribution::from_samples(&samples, 5);
-        
+
         println!("Bins: {:?}", dist.bins());
         println!("Bin edges: {:?}", dist.bin_edges());
-        
+
         // Bins should sum to 1.0
         let sum: f32 = dist.bins().iter().sum();
         assert!((sum - 1.0).abs() < 0.01);
@@ -548,7 +562,7 @@ mod tests {
     #[test]
     fn test_interpret_psi() {
         let monitor = SpcMonitor::new();
-        
+
         assert_eq!(monitor.interpret_psi(0.05), Stability::Stable);
         assert_eq!(monitor.interpret_psi(0.15), Stability::Investigate);
         assert_eq!(monitor.interpret_psi(0.30), Stability::ActionRequired);
@@ -559,11 +573,14 @@ mod tests {
         // Test with known values
         let p = SpcMonitor::kolmogorov_p_value(0.5, 100.0, 100.0);
         println!("P-value for D=0.5, n=100: {:.6}", p);
-        
+
         // Larger D should give smaller p-value
         let p2 = SpcMonitor::kolmogorov_p_value(0.8, 100.0, 100.0);
         println!("P-value for D=0.8, n=100: {:.6}", p2);
-        
-        assert!(p2 < p || p < 0.001);
+
+        assert!(
+            p2 < p,
+            "KS p-value must decrease for larger D statistic (p2={p2:.6} should be < p={p:.6})"
+        );
     }
 }
