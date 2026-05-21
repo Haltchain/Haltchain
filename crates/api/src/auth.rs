@@ -1,6 +1,8 @@
 use std::{
     collections::HashSet,
+    collections::VecDeque,
     sync::OnceLock,
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 
@@ -13,6 +15,7 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
+use governor::{DefaultDirectRateLimiter, Quota, RateLimiter as GovernorRateLimiter};
 use hmac::{Hmac, Mac};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use parking_lot::Mutex;
@@ -20,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{error, warn};
 
 use base64::{Engine as _, engine::general_purpose};
@@ -49,6 +53,7 @@ static CLIENT_PUBKEYS: OnceLock<DashMap<String, VerifyingKey>> = OnceLock::new()
 
 // Multi-layer rate limiting state
 static RATE_LIMITER: OnceLock<RateLimiter> = OnceLock::new();
+static VALIDATE_INGRESS_GATE: OnceLock<ValidateIngressGate> = OnceLock::new();
 
 // Admin MFA configuration (loaded from env vars on first use)
 static ADMIN_TOTP_SECRET: OnceLock<Option<String>> = OnceLock::new();
@@ -63,12 +68,24 @@ const JWT_EXPIRY_SECS: u64 = 900;
 const ADMIN_SESSION_EXPIRY_SECS: u64 = 60 * 60 * 8;
 
 /// Claims encoded in short-lived API JWT tokens.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JwtClaims {
     pub sub: String, // agent_id
     pub exp: u64,    // Unix expiry
     pub iat: u64,    // issued-at
     pub jti: String, // unique token id (nonce)
+    /// Space-separated OAuth2-style scopes (e.g. "validate read:status").
+    /// Empty string means unrestricted (legacy tokens).
+    #[serde(default)]
+    pub scp: String,
+}
+
+impl JwtClaims {
+    /// Returns true if the token carries the given scope, or if the token
+    /// has no scopes at all (unrestricted legacy token).
+    pub fn has_scope(&self, scope: &str) -> bool {
+        self.scp.is_empty() || self.scp.split_whitespace().any(|s| s == scope)
+    }
 }
 
 /// Claims for admin browser sessions issued by `POST /auth/admin/login`.
@@ -305,6 +322,249 @@ impl RateLimiter {
     }
 }
 
+struct ValidateIngressGate {
+    limiter: Mutex<DefaultDirectRateLimiter>,
+    semaphore: std::sync::Arc<Semaphore>,
+    inflight: AtomicUsize,
+    permit_limit: AtomicUsize,
+    permit_floor: AtomicUsize,
+    p95_target_ms: AtomicU64,
+    latency_samples: Mutex<VecDeque<(Instant, u64)>>,
+    breach_since: Mutex<Option<Instant>>,
+    adaptive_window: Duration,
+}
+
+struct ValidateGatePermit<'a> {
+    _permit: OwnedSemaphorePermit,
+    gate: &'a ValidateIngressGate,
+}
+
+impl Drop for ValidateGatePermit<'_> {
+    fn drop(&mut self) {
+        self.gate.inflight.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct ValidateIngressConfig {
+    rate_limit_rps: u32,
+    burst: u32,
+    permits: usize,
+    permit_floor: usize,
+    p95_target_ms: u64,
+}
+
+impl ValidateIngressConfig {
+    fn from_env() -> Self {
+        let rate_limit_rps = std::env::var("HALTCHAIN_VALIDATE_RATE_LIMIT_RPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10_000)
+            .max(1);
+        let burst = std::env::var("HALTCHAIN_VALIDATE_RATE_LIMIT_BURST")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2_000)
+            .max(1);
+        let permits = std::env::var("HALTCHAIN_VALIDATE_SEMAPHORE_PERMITS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(29)
+            .max(1);
+        let permit_floor = std::env::var("HALTCHAIN_VALIDATE_SEMAPHORE_FLOOR")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8)
+            .max(1)
+            .min(permits);
+        let p95_target_ms = std::env::var("HALTCHAIN_VALIDATE_P95_TARGET_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2)
+            .max(1);
+        Self {
+            rate_limit_rps,
+            burst,
+            permits,
+            permit_floor,
+            p95_target_ms,
+        }
+    }
+}
+
+impl ValidateIngressGate {
+    fn new(cfg: ValidateIngressConfig) -> Self {
+        Self {
+            limiter: Mutex::new(build_validate_limiter(cfg.rate_limit_rps, cfg.burst)),
+            semaphore: std::sync::Arc::new(Semaphore::new(cfg.permits)),
+            inflight: AtomicUsize::new(0),
+            permit_limit: AtomicUsize::new(cfg.permits),
+            permit_floor: AtomicUsize::new(cfg.permit_floor),
+            p95_target_ms: AtomicU64::new(cfg.p95_target_ms),
+            latency_samples: Mutex::new(VecDeque::new()),
+            breach_since: Mutex::new(None),
+            adaptive_window: Duration::from_secs(3),
+        }
+    }
+
+    fn check_rate_limit(&self) -> bool {
+        let limiter = self.limiter.lock();
+        limiter.check().is_ok()
+    }
+
+    fn try_acquire(&self) -> Option<ValidateGatePermit<'_>> {
+        let limit = self.permit_limit.load(Ordering::Acquire);
+        let inflight = self.inflight.load(Ordering::Acquire);
+        if inflight >= limit {
+            return None;
+        }
+
+        let permit = self.semaphore.clone().try_acquire_owned().ok()?;
+        let prev = self.inflight.fetch_add(1, Ordering::AcqRel);
+        if prev + 1 > limit {
+            self.inflight.fetch_sub(1, Ordering::AcqRel);
+            drop(permit);
+            return None;
+        }
+        Some(ValidateGatePermit {
+            _permit: permit,
+            gate: self,
+        })
+    }
+
+    fn observe_latency(&self, elapsed: Duration) {
+        let mut samples = self.latency_samples.lock();
+        let now = Instant::now();
+        samples.push_back((now, elapsed.as_micros() as u64));
+        while let Some((ts, _)) = samples.front() {
+            if now.duration_since(*ts) > self.adaptive_window {
+                samples.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn maybe_reduce_permits(&self) {
+        let now = Instant::now();
+        let window = self.adaptive_window;
+        let target_us = self.p95_target_ms.load(Ordering::Relaxed) * 1_000;
+
+        let p95_us = {
+            let mut samples = self.latency_samples.lock();
+            while let Some((ts, _)) = samples.front() {
+                if now.duration_since(*ts) > window {
+                    samples.pop_front();
+                } else {
+                    break;
+                }
+            }
+            if samples.len() < 20 {
+                return;
+            }
+            let mut latencies = samples.iter().map(|(_, us)| *us).collect::<Vec<_>>();
+            latencies.sort_unstable();
+            let idx = ((latencies.len() - 1) as f64 * 0.95).round() as usize;
+            latencies[idx]
+        };
+
+        let mut breach = self.breach_since.lock();
+        if p95_us > target_us {
+            match *breach {
+                Some(started) if now.duration_since(started) >= Duration::from_secs(3) => {
+                    let current = self.permit_limit.load(Ordering::Acquire);
+                    let floor = self.permit_floor.load(Ordering::Acquire);
+                    if current > floor {
+                        let mut reduced = ((current as f64) * 0.9).ceil() as usize;
+                        if reduced >= current {
+                            reduced = current.saturating_sub(1);
+                        }
+                        let next = reduced.max(floor);
+                        self.permit_limit.store(next, Ordering::Release);
+                        warn!(
+                            current_permits = current,
+                            reduced_permits = next,
+                            p95_us,
+                            target_us,
+                            "validate adaptive backpressure reduced permit limit"
+                        );
+                    }
+                    *breach = Some(now);
+                }
+                Some(_) => {}
+                None => *breach = Some(now),
+            }
+        } else {
+            *breach = None;
+        }
+    }
+}
+
+fn build_validate_limiter(rps: u32, burst: u32) -> DefaultDirectRateLimiter {
+    let per_second = std::num::NonZeroU32::new(rps.max(1)).expect("non-zero rps");
+    let burst_nz = std::num::NonZeroU32::new(burst.max(1)).expect("non-zero burst");
+    let quota = Quota::per_second(per_second).allow_burst(burst_nz);
+    GovernorRateLimiter::direct(quota)
+}
+
+fn validate_ingress_gate() -> &'static ValidateIngressGate {
+    VALIDATE_INGRESS_GATE
+        .get_or_init(|| ValidateIngressGate::new(ValidateIngressConfig::from_env()))
+}
+
+pub fn spawn_validate_adaptive_controller() {
+    // Ensure the gate is initialized from env before the controller starts.
+    let gate = validate_ingress_gate();
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            ticker.tick().await;
+            gate.maybe_reduce_permits();
+        }
+    });
+}
+
+pub async fn validate_ingress_middleware(
+    req: Request,
+    next: Next,
+) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    if req.uri().path() != "/validate" && req.uri().path() != "/v1/validate" {
+        return Ok(next.run(req).await);
+    }
+
+    let gate = validate_ingress_gate();
+    if !gate.check_rate_limit() {
+        return Err((
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({
+                "error": "rate_limit_exceeded",
+                "code": "VALIDATE_RATE_LIMIT",
+                "message": "validate ingress rate limit exceeded"
+            })),
+        ));
+    }
+
+    let permit = gate.try_acquire().ok_or((
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "error": "overloaded",
+            "code": "VALIDATE_OVERLOADED",
+            "message": "validate ingress is saturated"
+        })),
+    ))?;
+
+    let started = Instant::now();
+    let response = next.run(req).await;
+    gate.observe_latency(started.elapsed());
+    drop(permit);
+    Ok(response)
+}
+
+#[cfg(test)]
+fn make_validate_ingress_gate_for_test(cfg: ValidateIngressConfig) -> ValidateIngressGate {
+    ValidateIngressGate::new(cfg)
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum RateLimitError {
     Global,
@@ -367,9 +627,20 @@ pub fn require_admin(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serde_
 }
 
 pub fn require_api_key(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    require_api_key_with_scope(headers, None)
+}
+
+/// Like `require_api_key` but also checks that the JWT (if used) carries the
+/// required scope.  Static API keys are treated as unrestricted but emit a
+/// deprecation warning.
+pub fn require_api_key_with_scope(
+    headers: &HeaderMap,
+    required_scope: Option<&str>,
+) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
     // Accept static API keys in X-API-Key header.
     if let Some(k) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
         if configured_api_keys().contains(k) {
+            warn!("static API key used — migrate to scoped JWT tokens via POST /auth/token");
             return Ok(());
         }
         return Err((
@@ -382,7 +653,19 @@ pub fn require_api_key(headers: &HeaderMap) -> Result<(), (StatusCode, Json<serd
         && let Some(token) = auth.strip_prefix("Bearer ")
     {
         match verify_jwt_token(token) {
-            Ok(_) => return Ok(()),
+            Ok(claims) => {
+                if let Some(scope) = required_scope {
+                    if !claims.has_scope(scope) {
+                        return Err((
+                            StatusCode::FORBIDDEN,
+                            Json(
+                                json!({ "error": format!("token missing required scope: {scope}") }),
+                            ),
+                        ));
+                    }
+                }
+                return Ok(());
+            }
             Err(e) => {
                 warn!("JWT verification failed: {e}");
                 return Err((
@@ -790,9 +1073,15 @@ fn configured_jwt_secret() -> &'static Option<String> {
     JWT_SECRET.get_or_init(|| std::env::var("HALTCHAIN_JWT_SECRET").ok())
 }
 
-/// Issue a short-lived JWT for the given agent_id.
+/// Issue a short-lived JWT for the given agent_id (unrestricted scopes).
 /// Returns `Err` if `HALTCHAIN_JWT_SECRET` is not configured.
 pub fn issue_jwt_token(agent_id: &str) -> Result<String, String> {
+    issue_scoped_jwt_token(agent_id, &[])
+}
+
+/// Issue a short-lived JWT with explicit scope claims.
+/// An empty `scopes` slice means unrestricted (backward-compatible).
+pub fn issue_scoped_jwt_token(agent_id: &str, scopes: &[&str]) -> Result<String, String> {
     let secret = configured_jwt_secret()
         .as_ref()
         .ok_or_else(|| "JWT not configured (HALTCHAIN_JWT_SECRET not set)".to_string())?;
@@ -805,6 +1094,7 @@ pub fn issue_jwt_token(agent_id: &str) -> Result<String, String> {
         exp: now + JWT_EXPIRY_SECS,
         iat: now,
         jti: uuid::Uuid::new_v4().to_string(),
+        scp: scopes.join(" "),
     };
     encode(
         &Header::default(),
@@ -913,5 +1203,68 @@ mod tests {
             require_admin_mfa(&headers).is_err(),
             "wrong admin key must be rejected"
         );
+    }
+
+    #[tokio::test]
+    async fn validate_ingress_gate_rate_limiter_denies_after_burst() {
+        let gate = make_validate_ingress_gate_for_test(ValidateIngressConfig {
+            rate_limit_rps: 1,
+            burst: 1,
+            permits: 4,
+            permit_floor: 1,
+            p95_target_ms: 5,
+        });
+
+        assert!(gate.check_rate_limit(), "first request should be allowed");
+        assert!(
+            !gate.check_rate_limit(),
+            "second immediate request should be rate limited"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_ingress_gate_returns_none_when_permits_exhausted() {
+        let gate = make_validate_ingress_gate_for_test(ValidateIngressConfig {
+            rate_limit_rps: 100,
+            burst: 100,
+            permits: 1,
+            permit_floor: 1,
+            p95_target_ms: 5,
+        });
+
+        let permit = gate.try_acquire();
+        assert!(permit.is_some(), "first permit should be acquired");
+        let second = gate.try_acquire();
+        assert!(
+            second.is_none(),
+            "second acquisition should fail when semaphore is saturated"
+        );
+    }
+
+    mod concurrency {
+        use super::*;
+
+        #[tokio::test]
+        async fn semaphore_drop() {
+            let gate = make_validate_ingress_gate_for_test(ValidateIngressConfig {
+                rate_limit_rps: 100,
+                burst: 100,
+                permits: 1,
+                permit_floor: 1,
+                p95_target_ms: 5,
+            });
+
+            let hold = gate.try_acquire();
+            assert!(hold.is_some(), "first permit should be acquired");
+            assert!(
+                gate.try_acquire().is_none(),
+                "semaphore should reject when permit is exhausted"
+            );
+            drop(hold);
+            assert!(
+                gate.try_acquire().is_some(),
+                "permit should be available again after drop"
+            );
+        }
     }
 }

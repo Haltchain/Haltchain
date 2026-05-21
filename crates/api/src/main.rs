@@ -2,17 +2,28 @@ mod admin_users;
 mod audit_log;
 mod auth;
 mod handlers;
+mod metrics;
+mod siem;
 mod tls;
 
 use std::{sync::Arc, time::Duration};
 
-use haltchain_validator::AppState;
+use clap::Parser;
+use haltchain_validator::{AppState, DeployProfile};
 use tracing::info;
 
 // Re-exports used by the test module via `use super::*`.
 pub use axum::http::StatusCode;
 pub use handlers::build_app;
 pub use serde_json::json;
+
+#[derive(Parser)]
+#[command(name = "haltchain", about = "HaltChain AI safety validator")]
+struct Cli {
+    /// Deployment profile: "full" (default) or "standalone" (single-binary, no DB).
+    #[arg(long, default_value = "full")]
+    profile: String,
+}
 
 #[tokio::main]
 async fn main() {
@@ -23,15 +34,38 @@ async fn main() {
         )
         .init();
 
-    let state = AppState::new_async().await;
+    let cli = Cli::parse();
+    let deploy_profile = match cli.profile.as_str() {
+        "standalone" => DeployProfile::Standalone,
+        "full" => DeployProfile::Full,
+        other => {
+            eprintln!("unknown profile '{other}', expected 'full' or 'standalone'");
+            std::process::exit(1);
+        }
+    };
+
+    let state = match deploy_profile {
+        DeployProfile::Standalone => {
+            info!("starting in standalone mode (SQLite, hash embeddings)");
+            AppState::new_standalone().await
+        }
+        DeployProfile::Full => AppState::new_async().await,
+    };
     {
         let learning_interval: u64 = std::env::var("HALTCHAIN_LEARNING_INTERVAL_SECS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(120);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(120);
         let learning_max_age: i64 = std::env::var("HALTCHAIN_LEARNING_MAX_AGE_HOURS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(24);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(24);
         let state = Arc::clone(&state);
         tokio::spawn(async move {
-            info!(interval_secs = learning_interval, "background worker started: learning-loop");
+            info!(
+                interval_secs = learning_interval,
+                "background worker started: learning-loop"
+            );
             let mut ticker = tokio::time::interval(Duration::from_secs(learning_interval));
             loop {
                 ticker.tick().await;
@@ -48,10 +82,15 @@ async fn main() {
     }
     {
         let wal_interval: u64 = std::env::var("HALTCHAIN_WAL_FLUSH_INTERVAL_SECS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(60);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
         let state = Arc::clone(&state);
         tokio::spawn(async move {
-            info!(interval_secs = wal_interval, "background worker started: WAL flush");
+            info!(
+                interval_secs = wal_interval,
+                "background worker started: WAL flush"
+            );
             let mut ticker = tokio::time::interval(Duration::from_secs(wal_interval));
             loop {
                 ticker.tick().await;
@@ -89,7 +128,10 @@ async fn main() {
         });
     }
 
-    {   // Rate limiter stale-entry cleanup
+    crate::auth::spawn_validate_adaptive_controller();
+
+    {
+        // Rate limiter stale-entry cleanup
         tokio::spawn(async move {
             info!("background worker started: rate-limiter cleanup");
             let mut ticker = tokio::time::interval(Duration::from_secs(120));
@@ -104,13 +146,12 @@ async fn main() {
     info!("spawning deep-scan worker");
     state.spawn_scan_worker();
 
-    // Bootstrap first admin user from env vars if admin_users table is empty.
-    if let Some(db) = state.db.as_ref() {
-        admin_users::bootstrap_if_empty(db.pool()).await;
+    if let Some(db) = state.db.as_deref() {
+        admin_users::bootstrap_if_configured(db).await;
     }
 
     let app = build_app(state);
-    // Fly.io sets PORT=8080; internal_port in fly.toml must match
+    // Respect PORT when provided; default to 8080 for local/dev.
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
@@ -119,7 +160,8 @@ async fn main() {
 
     if let Some(acceptor) = tls::tls_acceptor_from_env() {
         info!("HaltChain Validator listening on {addr} (TLS)");
-        let listener = tokio::net::TcpListener::bind(&addr).await
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
             .expect("failed to bind TCP listener (is the port in use?)");
         // Bound concurrent TLS connections to prevent resource exhaustion.
         let max_conns: usize = std::env::var("HALTCHAIN_MAX_CONNECTIONS")
@@ -179,10 +221,10 @@ async fn main() {
         }
     } else {
         info!("HaltChain Validator listening on {addr} (plain HTTP)");
-        let listener = tokio::net::TcpListener::bind(&addr).await
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
             .expect("failed to bind TCP listener (is the port in use?)");
-        axum::serve(listener, app).await
-            .expect("HTTP server error");
+        axum::serve(listener, app).await.expect("HTTP server error");
     }
 }
 
@@ -223,6 +265,36 @@ mod tests {
             .await
             .expect("body should read");
         serde_json::from_slice(&bytes).expect("response should be json")
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_includes_request_and_cache_metrics() {
+        let state = AppState::new();
+        let app = build_app(state);
+
+        crate::metrics::record_validate();
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("metrics endpoint should respond");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .expect("body should read");
+        let text = String::from_utf8(body.to_vec()).expect("metrics should be utf-8");
+
+        assert!(text.contains("haltchain_validate_requests_total"));
+        assert!(text.contains("haltchain_decision_cache_entries"));
+        assert!(text.contains("haltchain_decision_cache_hit_rate"));
     }
 
     #[tokio::test]

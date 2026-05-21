@@ -21,10 +21,12 @@ base64            = { workspace = true }
 ed25519-dalek     = { workspace = true }
 dashmap           = { workspace = true }
 haltchain-validator  = { path = "../validator" }
+haltchain-db         = { path = "../db" }
 haltchain-cognitive  = { path = "../cognitive" }
 haltchain-capability = { path = "../capability" }
 haltchain-merkle     = { path = "../merkle" }
 haltchain-tendermint = { path = "../tendermint" }
+haltchain-rules      = { path = "../rules" }
 argon2               = { workspace = true }
 bcrypt               = { workspace = true }
 sqlx                 = { workspace = true }
@@ -39,7 +41,11 @@ hyper-util          = { workspace = true }
 jsonwebtoken        = { workspace = true }
 thiserror           = { workspace = true }
 tower               = "0.5"
+clap                = { workspace = true }
+serde_yaml          = { workspace = true }
 chacha20poly1305    = { workspace = true }
 rand_core           = { workspace = true }
+reqwest             = { workspace = true }
+governor            = "0.6"
 
 [dev-dependencies]
