@@ -1,12 +1,12 @@
-use std::sync::Arc;
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_stream::stream;
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     middleware,
     response::IntoResponse,
     response::sse::{Event, KeepAlive, Sse},
@@ -19,16 +19,21 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::admin_users;
-use crate::audit_log::{append_audit_event, read_recent_audit_events};
-use crate::auth::{
-    check_and_insert_nonce, configured_api_keys, issue_admin_session_jwt, issue_jwt_token,
-    rate_limit_middleware, require_admin_mfa, require_api_key, security_middleware,
-    timestamp_fresh, verify_admin_session_jwt, verify_request_sig,
+use crate::audit_log::{
+    AuditQueryFilter, append_audit_event, query_audit_events, read_recent_audit_events,
 };
+use crate::auth::{
+    check_and_insert_nonce, configured_api_keys, issue_admin_session_jwt, issue_scoped_jwt_token,
+    rate_limit_middleware, require_admin_mfa, require_api_key, security_middleware,
+    timestamp_fresh, validate_ingress_middleware, verify_admin_session_jwt, verify_request_sig,
+};
+use crate::metrics;
+use crate::siem::{emit_cef, fire_webhook_if_critical, format_cef_line};
 use haltchain_merkle::{DistributedMerkleVerifier, RootAttestation};
 use haltchain_tendermint::{QueryRequest, TendermintBridge, TendermintBridgeConfig};
 use haltchain_validator::{
     AgentVersion, AppState, ApproveRecommendationRequest, CreateVariantReq,
+    McpInspectDecision, McpInspectToolCall,
     RejectRecommendationRequest, ReportIntentRequest, RevertRecommendationRequest, ThresholdPatch,
     ValidationRequest, VersionLineageEntry, review::OutcomeRequest,
 };
@@ -103,11 +108,53 @@ struct SubmitImprovementRequest {
     proposed: AgentVersion,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestAuthMode {
+    Hybrid,
+    Ed25519Only,
+    LegacyHmac,
+}
+
+impl RequestAuthMode {
+    fn from_env() -> Self {
+        match std::env::var("HALTCHAIN_REQUEST_AUTH_MODE") {
+            Ok(v)
+                if v.eq_ignore_ascii_case("ed25519") || v.eq_ignore_ascii_case("ed25519_only") =>
+            {
+                Self::Ed25519Only
+            }
+            Ok(v) if v.eq_ignore_ascii_case("legacy") || v.eq_ignore_ascii_case("hmac") => {
+                Self::LegacyHmac
+            }
+            _ => Self::Hybrid,
+        }
+    }
+}
+
+fn has_ed25519_headers(headers: &HeaderMap) -> bool {
+    headers.contains_key("x-haltchain-signature")
+        && headers.contains_key("x-haltchain-timestamp")
+        && headers.contains_key("x-haltchain-nonce")
+        && headers.contains_key("x-haltchain-key-id")
+}
+
 pub async fn validate(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(wire): Json<WireValidationRequest>,
 ) -> impl IntoResponse {
+    let auth_mode = RequestAuthMode::from_env();
+    let has_ed25519 = has_ed25519_headers(&headers);
+    if auth_mode == RequestAuthMode::Ed25519Only && !has_ed25519 {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(json!({
+                "error": "ed25519 request signature headers are required in HALTCHAIN_REQUEST_AUTH_MODE=ed25519_only"
+            })),
+        )
+            .into_response();
+    }
+
     let mut req = wire.req;
     if req.agent_id.trim().is_empty() {
         return (
@@ -148,46 +195,83 @@ pub async fn validate(
         }
     };
 
-    // P0: Replay protection - check nonce and timestamp
-    if wire.request_nonce.trim().is_empty()
-        || wire.request_timestamp.trim().is_empty()
-        || wire.request_sig.trim().is_empty()
+    let require_legacy_hmac = match auth_mode {
+        RequestAuthMode::LegacyHmac => true,
+        RequestAuthMode::Hybrid => !has_ed25519,
+        RequestAuthMode::Ed25519Only => false,
+    };
+    if require_legacy_hmac {
+        // Legacy anti-replay + signature checks remain available during migration.
+        if wire.request_nonce.trim().is_empty()
+            || wire.request_timestamp.trim().is_empty()
+            || wire.request_sig.trim().is_empty()
+        {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "request_nonce, request_timestamp, and request_sig are required" })),
+            )
+                .into_response();
+        }
+
+        if !timestamp_fresh(&wire.request_timestamp) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "request_timestamp outside freshness window" })),
+            )
+                .into_response();
+        }
+
+        if !check_and_insert_nonce(&wire.request_nonce) {
+            warn!(agent_id = %req.agent_id, nonce = %wire.request_nonce, "Replay attack detected");
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "replayed request_nonce" })),
+            )
+                .into_response();
+        }
+
+        if !verify_request_sig(
+            &req.agent_id,
+            &api_key,
+            &wire.request_nonce,
+            &wire.request_timestamp,
+            &wire.request_sig,
+        ) {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "invalid request_sig" })),
+            )
+                .into_response();
+        }
+    }
+
+    let tenant_org = match headers
+        .get("x-haltchain-org")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
     {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "request_nonce, request_timestamp, and request_sig are required" })),
-        )
-            .into_response();
-    }
+        Some(raw) => match Uuid::parse_str(raw) {
+            Ok(v) => Some(v),
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "error": "x-haltchain-org must be a valid UUID" })),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
 
-    if !timestamp_fresh(&wire.request_timestamp) {
+    let require_tenant_org = std::env::var("HALTCHAIN_REQUIRE_TENANT_ORG")
+        .ok()
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+        .unwrap_or(true);
+    if require_tenant_org && state.db.is_some() && tenant_org.is_none() {
         return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "request_timestamp outside freshness window" })),
-        )
-            .into_response();
-    }
-
-    // P0: Check for replay attacks
-    if !check_and_insert_nonce(&wire.request_nonce) {
-        warn!(agent_id = %req.agent_id, nonce = %wire.request_nonce, "Replay attack detected");
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "replayed request_nonce" })),
-        )
-            .into_response();
-    }
-
-    if !verify_request_sig(
-        &req.agent_id,
-        &api_key,
-        &wire.request_nonce,
-        &wire.request_timestamp,
-        &wire.request_sig,
-    ) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({ "error": "invalid request_sig" })),
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "x-haltchain-org header is required" })),
         )
             .into_response();
     }
@@ -209,16 +293,50 @@ pub async fn validate(
         {
             m.insert("scan_tier".to_string(), json!(tier_str));
         }
+        if let Some(org_id) = tenant_org {
+            m.insert("haltchain_org".to_string(), json!(org_id.to_string()));
+        }
+        if let Some(region) = headers
+            .get("x-haltchain-region")
+            .and_then(|v| v.to_str().ok())
+        {
+            m.insert("haltchain_region".to_string(), json!(region));
+        }
     }
 
     info!(agent_id = %req.agent_id, action = %req.action.action_type, "validate request");
 
     let response = state.validate(&req).await;
+    metrics::record_validate();
+    let decision_str = response.decision.as_str();
+    let intent_label = state.latest_intent_label(&req.agent_id);
+
+    // ── Section C: SIEM integration ───────────────────────────────────────────
+    // Emit a CEF line for every decision and fire a webhook for critical ones.
+    let merkle_root = state.merkle.status().root_hex;
+    let cef_line = format_cef_line(
+        &response.transaction_id,
+        &req.agent_id,
+        decision_str,
+        response.policy.as_deref(),
+        &response.timestamp,
+        merkle_root.as_deref(),
+        intent_label.as_deref(),
+    );
+    emit_cef(&cef_line);
+    fire_webhook_if_critical(
+        &response.transaction_id,
+        &req.agent_id,
+        decision_str,
+        response.policy.as_deref(),
+        &response.timestamp,
+    );
+
     if let Err(e) = append_audit_event(json!({
         "event": "validate",
         "agent_id": req.agent_id,
         "action_type": req.action.action_type,
-        "decision": response.decision.as_str(),
+        "decision": decision_str,
         "transaction_id": response.transaction_id,
         "request_nonce": wire.request_nonce,
         "request_sig": wire.request_sig,
@@ -243,6 +361,61 @@ pub async fn health() -> impl IntoResponse {
         "version": env!("CARGO_PKG_VERSION"),
         "service": "haltchain-validator"
     }))
+}
+
+pub async fn health_live() -> impl IntoResponse {
+    Json(json!({ "status": "ok", "check": "live" }))
+}
+
+pub async fn health_ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.readiness_check().await {
+        Ok(()) => {
+            // also check extension health when postgres is available
+            let ext_status = state.extension_health().await;
+            let all_ok = ext_status.values().all(|v| *v);
+            let status_code = if all_ok { StatusCode::OK } else { StatusCode::OK }; // degraded still 200 for k8s
+            (
+                status_code,
+                Json(json!({
+                    "status": "ready",
+                    "database": "ok",
+                    "extensions": ext_status,
+                    "degraded": !all_ok,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "not_ready", "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+pub async fn metrics_prom(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    (
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
+        metrics::prometheus_text(&state),
+    )
+}
+
+pub async fn health_started(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.embedding_probe().await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(json!({ "status": "started", "embedding": "ok" })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "status": "not_started", "error": e })),
+        )
+            .into_response(),
+    }
 }
 
 async fn declare_goal(
@@ -347,6 +520,10 @@ pub async fn rotate_key(
 
 pub async fn merkle_root(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(state.merkle.status())
+}
+
+pub async fn audit_chain_status() -> impl IntoResponse {
+    Json(crate::audit_log::AuditChain::global().status())
 }
 
 async fn run_recommendations(
@@ -674,10 +851,18 @@ pub async fn report_intent(
             .into_response();
     }
     info!(agent_id = %req.agent_id, "intent reported");
-    state
+    let record = state
         .record_intent(&req.agent_id, &req.goal, req.constraints)
         .await;
-    Json(json!({ "status": "recorded", "agent_id": req.agent_id })).into_response()
+    Json(json!({
+        "status": "recorded",
+        "agent_id": req.agent_id,
+        "intent_label": record.intent_label,
+        "intent_confidence": record.intent_confidence,
+        "research_score": record.research_score,
+        "intent_score": record.intent_score,
+    }))
+    .into_response()
 }
 
 async fn cognitive_scan(
@@ -750,7 +935,90 @@ async fn capability_trajectory_handler(
     Json(json!({ "agent_id": agent_id, "trajectory": breakdown })).into_response()
 }
 
-async fn token_exchange(headers: HeaderMap) -> impl IntoResponse {
+async fn mcp_inspect(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(call): Json<McpInspectToolCall>,
+) -> impl IntoResponse {
+    if let Err(err) = require_api_key(&headers) {
+        return err.into_response();
+    }
+
+    let org_header = match headers
+        .get("x-haltchain-org")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(v) => v,
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "x-haltchain-org header is required" })),
+            )
+                .into_response();
+        }
+    };
+
+    match Uuid::parse_str(org_header) {
+        Ok(org_id) if org_id != call.org_id => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "x-haltchain-org must match body.org_id" })),
+            )
+                .into_response();
+        }
+        Ok(_) => {}
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "x-haltchain-org must be a valid UUID" })),
+            )
+                .into_response();
+        }
+    }
+
+    match state.inspect_mcp_tool_call(&call).await {
+        Ok(McpInspectDecision::Allow) => {
+            Json(json!({ "decision": "allow", "result": "allow" })).into_response()
+        }
+        Ok(McpInspectDecision::Block { reason, intent }) => Json(json!({
+            "decision": "block",
+            "result": "block",
+            "reason": reason,
+            "intent": intent,
+        }))
+        .into_response(),
+        Ok(McpInspectDecision::Quarantine {
+            review_id,
+            reason,
+            intent,
+        }) => Json(json!({
+            "decision": "quarantine",
+            "result": "quarantine",
+            "review_id": review_id,
+            "reason": reason,
+            "intent": intent,
+        }))
+        .into_response(),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenExchangeRequest {
+    #[serde(default)]
+    scopes: Vec<String>,
+}
+
+async fn token_exchange(
+    headers: HeaderMap,
+    body: Option<Json<TokenExchangeRequest>>,
+) -> impl IntoResponse {
     // Exchange a valid static API key for a short-lived JWT (15 min).
     if let Err(e) = require_api_key(&headers) {
         return e.into_response();
@@ -760,15 +1028,19 @@ async fn token_exchange(headers: HeaderMap) -> impl IntoResponse {
         .get("x-agent-id")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("api-key-holder");
-    match issue_jwt_token(agent_id) {
+    let scopes: Vec<String> = body.map(|b| b.0.scopes).unwrap_or_default();
+    let scope_refs: Vec<&str> = scopes.iter().map(String::as_str).collect();
+    match issue_scoped_jwt_token(agent_id, &scope_refs) {
         Ok(token) => {
             if let Err(e) = append_audit_event(json!({
                 "event": "token_exchange",
                 "agent_id": agent_id,
+                "scopes": scopes,
             })) {
                 warn!(error = %e, "failed to append audit event for token exchange");
             }
-            Json(json!({ "token": token, "expires_in": 900 })).into_response()
+            let scp_str = scopes.join(" ");
+            Json(json!({ "token": token, "expires_in": 900, "scopes": scp_str })).into_response()
         }
         Err(msg) => (StatusCode::NOT_IMPLEMENTED, Json(json!({ "error": msg }))).into_response(),
     }
@@ -784,6 +1056,58 @@ async fn admin_read_audit_log(
     let limit = query.limit.unwrap_or(100).clamp(1, 500);
     match read_recent_audit_events(limit) {
         Ok(events) => Json(json!({ "events": events, "limit": limit })).into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+/// `POST /audit/query` — Filtered audit log search.
+///
+/// Accepts a JSON body:
+/// ```json
+/// {
+///   "time_from": 1700000000,   // epoch seconds, optional
+///   "time_to":   1700099999,   // epoch seconds, optional
+///   "agent_id":  "agent-01",   // exact match, optional
+///   "decision":  "DENY",       // case-insensitive, optional
+///   "limit":     50            // max events returned, optional (default 100, max 500)
+/// }
+/// ```
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct AuditQueryRequest {
+    time_from: Option<i64>,
+    time_to: Option<i64>,
+    agent_id: Option<String>,
+    decision: Option<String>,
+    limit: Option<usize>,
+}
+
+pub async fn audit_query(
+    headers: HeaderMap,
+    Json(body): Json<AuditQueryRequest>,
+) -> impl IntoResponse {
+    if let Err(err) = require_api_key(&headers) {
+        return err.into_response();
+    }
+    let limit = body.limit.unwrap_or(100).clamp(1, 500);
+    let filter = AuditQueryFilter {
+        time_from: body.time_from,
+        time_to: body.time_to,
+        agent_id: body.agent_id,
+        decision: body.decision,
+        limit,
+    };
+    match query_audit_events(&filter) {
+        Ok(result) => Json(json!({
+            "events": result.events,
+            "count": result.events.len(),
+            "scanned": result.scanned,
+            "limit": limit,
+        }))
+        .into_response(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": e })),
@@ -958,8 +1282,8 @@ async fn admin_login(
         }
     }
 
-    let pool = match state.db.as_ref().map(|db| db.pool()) {
-        Some(p) => p,
+    let db = match state.db.as_deref() {
+        Some(d) => d,
         None => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -969,7 +1293,7 @@ async fn admin_login(
         }
     };
 
-    match admin_users::find_and_verify(pool, &body.email, &body.password).await {
+    match admin_users::find_and_verify_backend(db, &body.email, &body.password).await {
         Some(user) => {
             let token = issue_admin_session_jwt(&user.email);
             Json(json!({ "token": token })).into_response()
@@ -1002,11 +1326,375 @@ async fn admin_me(headers: HeaderMap) -> impl IntoResponse {
     }
 }
 
+// ─── Phase 2: Agent Registry Endpoints ────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct AgentRegistryRequest {
+    agent_id: String,
+}
+
+async fn admin_register_agent(
+    headers: HeaderMap,
+    Json(body): Json<AgentRegistryRequest>,
+) -> impl IntoResponse {
+    if let Err(err) = require_admin_mfa(&headers) {
+        return err.into_response();
+    }
+    if body.agent_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "agent_id is required" })),
+        )
+            .into_response();
+    }
+    haltchain_validator::agent_registry::AgentRegistry::global().register(&body.agent_id);
+    if let Err(e) = append_audit_event(json!({
+        "event": "agent_registered",
+        "agent_id": body.agent_id,
+    })) {
+        warn!(error = %e, "failed to log agent registration");
+    }
+    info!(agent_id = %body.agent_id, "agent registered");
+    Json(json!({ "status": "registered", "agent_id": body.agent_id })).into_response()
+}
+
+async fn admin_unregister_agent(
+    headers: HeaderMap,
+    Json(body): Json<AgentRegistryRequest>,
+) -> impl IntoResponse {
+    if let Err(err) = require_admin_mfa(&headers) {
+        return err.into_response();
+    }
+    if body.agent_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "agent_id is required" })),
+        )
+            .into_response();
+    }
+    haltchain_validator::agent_registry::AgentRegistry::global().unregister(&body.agent_id);
+    if let Err(e) = append_audit_event(json!({
+        "event": "agent_unregistered",
+        "agent_id": body.agent_id,
+    })) {
+        warn!(error = %e, "failed to log agent unregistration");
+    }
+    info!(agent_id = %body.agent_id, "agent unregistered");
+    Json(json!({ "status": "unregistered", "agent_id": body.agent_id })).into_response()
+}
+
+// Phase 3: Force-Halt Kill Switch
+
+async fn admin_force_halt(
+    State(state): State<Arc<AppState>>,
+    Path(agent_id): Path<String>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = require_admin_mfa(&headers) {
+        return err.into_response();
+    }
+    if agent_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "agent_id is required" })),
+        )
+            .into_response();
+    }
+    // Force-halt: trip circuit breaker with a long duration.
+    let reason = format!(
+        "ADMIN_FORCE_HALT by operator at {}",
+        chrono::Utc::now().to_rfc3339()
+    );
+    state.force_halt_agent(&agent_id, &reason).await;
+    if let Err(e) = append_audit_event(json!({
+        "event": "force_halt",
+        "agent_id": agent_id,
+        "reason": reason,
+    })) {
+        warn!(error = %e, "failed to log force halt");
+    }
+    info!(agent_id = %agent_id, "agent force-halted");
+    Json(json!({ "status": "halted", "agent_id": agent_id, "reason": reason })).into_response()
+}
+
+// Phase 3: Emergency Kill — system-wide containment
+
+async fn emergency_containment(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = require_admin_mfa(&headers) {
+        return err.into_response();
+    }
+    let reason = format!(
+        "EMERGENCY_CONTAINMENT by operator at {}",
+        chrono::Utc::now().to_rfc3339()
+    );
+    let halted = state.emergency_halt_all(&reason).await;
+    if let Err(e) = append_audit_event(json!({
+        "event": "emergency_containment",
+        "agents_halted": halted,
+        "reason": reason,
+    })) {
+        warn!(error = %e, "failed to log emergency containment");
+    }
+    info!(agents_halted = halted, "emergency containment activated");
+    Json(json!({
+        "status": "emergency_containment_active",
+        "agents_halted": halted,
+        "reason": reason
+    }))
+    .into_response()
+}
+
+// ── GitOps webhook: policy sync ───────────────────────────────────────────────
+
+/// Verifies a GitHub-style `X-Hub-Signature-256` HMAC against
+/// `HALTCHAIN_WEBHOOK_SECRET`.
+fn verify_webhook_signature(secret: &[u8], body: &[u8], header: &str) -> bool {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let expected_hex = header.strip_prefix("sha256=").unwrap_or(header);
+    let Ok(expected) = hex::decode(expected_hex) else {
+        return false;
+    };
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret).expect("HMAC accepts any key size");
+    mac.update(body);
+    mac.verify_slice(&expected).is_ok()
+}
+
+/// POST /admin/webhook/policy-sync
+///
+/// Accepts a raw YAML body (the new policy file) with a
+/// `X-Hub-Signature-256` header for authentication.
+/// On success the active policy is hot-swapped and the generation counter
+/// is bumped.
+async fn webhook_policy_sync(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> impl IntoResponse {
+    let secret = match std::env::var("HALTCHAIN_WEBHOOK_SECRET") {
+        Ok(s) if !s.is_empty() => s,
+        _ => {
+            warn!("webhook rejected: HALTCHAIN_WEBHOOK_SECRET not configured");
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "webhook not configured"})),
+            )
+                .into_response();
+        }
+    };
+
+    let sig_header = match headers
+        .get("x-hub-signature-256")
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(h) => h.to_owned(),
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({"error": "missing X-Hub-Signature-256"})),
+            )
+                .into_response();
+        }
+    };
+
+    if !verify_webhook_signature(secret.as_bytes(), &body, &sig_header) {
+        warn!("webhook rejected: invalid signature");
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "invalid signature"})),
+        )
+            .into_response();
+    }
+
+    // Parse the body as a policy YAML.
+    let pf: haltchain_rules::PolicyFile = match serde_yaml::from_slice(&body) {
+        Ok(pf) => pf,
+        Err(e) => {
+            warn!(error = %e, "webhook rejected: invalid policy YAML");
+            return (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({"error": format!("invalid YAML: {e}")})),
+            )
+                .into_response();
+        }
+    };
+
+    // Validate that the policy can build an evaluator.
+    if let Err(e) = haltchain_rules::RuleEvaluator::new(&pf) {
+        warn!(error = %e, "webhook rejected: policy fails evaluation build");
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({"error": format!("policy validation failed: {e}")})),
+        )
+            .into_response();
+    }
+
+    // Hot-swap the active policy via the rules handle.
+    // push_policy returns false when rules_handle is None (server started without
+    // POLICY_FILE), meaning the push would be silently dropped.  That is an error.
+    if !state.push_policy(pf) {
+        warn!("webhook rejected: policy engine not initialised (POLICY_FILE not configured)");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "policy engine not initialised; start the server with POLICY_FILE to enable hot-reload"})),
+        )
+            .into_response();
+    }
+    let generation = state.policy_generation();
+
+    if let Err(e) = append_audit_event(json!({
+        "event": "webhook_policy_sync",
+        "generation": generation,
+    })) {
+        warn!(error = %e, "failed to log webhook policy sync");
+    }
+
+    info!(generation, "policy hot-swapped via webhook");
+    Json(json!({
+        "status": "ok",
+        "generation": generation,
+    }))
+    .into_response()
+}
+
+// ── FTS Audit Search (Phase 1b) ───────────────────────────────────────────────
+
+#[derive(Debug, serde::Deserialize)]
+struct AuditFtsRequest {
+    q: String,
+    limit: Option<i64>,
+}
+
+async fn audit_fts_search(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<AuditFtsRequest>,
+) -> impl IntoResponse {
+    if let Err(err) = require_api_key(&headers) {
+        return err.into_response();
+    }
+    if body.q.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "q is required"}))).into_response();
+    }
+    let limit = body.limit.unwrap_or(50).clamp(1, 200);
+
+    let db_backend = match state.db.as_ref() {
+        Some(db) => db,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "FTS requires PostgreSQL; running in standalone mode"})),
+            )
+                .into_response();
+        }
+    };
+
+    match db_backend.as_postgres() {
+        Some(pg) => match pg.search_audit_decisions(&body.q, limit).await {
+            Ok(results) => {
+                let rows: Vec<_> = results
+                    .iter()
+                    .map(|r| {
+                        json!({
+                            "id": r.id,
+                            "transaction_id": r.transaction_id,
+                            "agent_id": r.agent_id,
+                            "decision": r.decision,
+                            "reason": r.reason,
+                            "policy_code": r.policy_code,
+                            "decided_at": r.decided_at,
+                        })
+                    })
+                    .collect();
+                Json(json!({"results": rows, "count": rows.len(), "query": body.q})).into_response()
+            }
+            Err(e) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({"error": format!("FTS query failed: {e}")})),
+            )
+                .into_response(),
+        },
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "FTS requires PostgreSQL; SQLite does not support TSVector"})),
+        )
+            .into_response(),
+    }
+}
+
+// ── DB-backed policy reload (Phase 1b: advisory lock hot-reload) ───────────────
+
+#[derive(Debug, serde::Deserialize)]
+struct PolicyDbReloadRequest {
+    policy_name: String,
+    rules: serde_json::Value,
+    org_id: uuid::Uuid,
+}
+
+async fn admin_policy_db_reload(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(body): Json<PolicyDbReloadRequest>,
+) -> impl IntoResponse {
+    if let Err(err) = require_admin_mfa(&headers) {
+        return err.into_response();
+    }
+    if body.policy_name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "policy_name required"})),
+        )
+            .into_response();
+    }
+
+    let db_backend = match state.db.as_ref() {
+        Some(db) => db,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({"error": "DB policy reload requires PostgreSQL"})),
+            )
+                .into_response();
+        }
+    };
+
+    match db_backend.as_postgres() {
+        Some(pg) => {
+            match pg
+                .reload_policy_with_lock(body.org_id, &body.policy_name, body.rules)
+                .await
+            {
+                Ok(()) => {
+                    info!(policy_name = %body.policy_name, "DB policy config reloaded with advisory lock");
+                    Json(json!({"status": "ok", "policy_name": body.policy_name})).into_response()
+                }
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"error": format!("policy reload failed: {e}")})),
+                )
+                    .into_response(),
+            }
+        }
+        None => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({"error": "DB policy reload requires PostgreSQL"})),
+        )
+            .into_response(),
+    }
+}
+
 fn api_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/validate", post(validate))
         .route("/auth/token", post(token_exchange))
         .route("/health", get(health))
+        .route("/health/live", get(health_live))
+        .route("/health/ready", get(health_ready))
+        .route("/health/started", get(health_started))
+        .route("/metrics", get(metrics_prom))
         .route("/status/:agent_id", get(agent_status))
         .route("/goals", post(declare_goal))
         .route("/goals/:agent_id/:session_id", delete(revoke_goal))
@@ -1014,6 +1702,8 @@ fn api_routes() -> Router<Arc<AppState>> {
         .route("/public-key", get(public_key))
         .route("/admin/rotate-key", post(rotate_key))
         .route("/merkle/root", get(merkle_root))
+        .route("/audit/chain", get(audit_chain_status))
+        .route("/audit/query", post(audit_query))
         .route("/admin/review-queue", get(review_queue))
         .route("/admin/review-queue/:tx_id/outcome", post(submit_outcome))
         .route("/admin/recommendations/run", post(run_recommendations))
@@ -1043,22 +1733,38 @@ fn api_routes() -> Router<Arc<AppState>> {
             post(revert_recommendation),
         )
         .route("/risk/advisories/:agent_id", get(list_risk_advisories))
-        .route("/risk/advisories/:agent_id/stream", get(risk_advisories_stream))
+        .route(
+            "/risk/advisories/:agent_id/stream",
+            get(risk_advisories_stream),
+        )
         .route("/admin/thresholds", get(get_thresholds))
         .route("/admin/thresholds", patch(patch_threshold))
         .route("/admin/ab-variants", get(list_variants))
         .route("/admin/ab-variants", post(create_variant))
         .route("/agent/improvement/snapshot", post(snapshot_agent_version))
         .route("/agent/improvement/submit", post(submit_agent_improvement))
-        .route("/agent/improvement/lineage/:agent_id", get(get_agent_lineage))
+        .route(
+            "/agent/improvement/lineage/:agent_id",
+            get(get_agent_lineage),
+        )
         .route("/agent/report-intent", post(report_intent))
         .route("/cognitive/scan", post(cognitive_scan))
         .route("/capability/risk/:agent_id", get(capability_risk_handler))
         .route("/scan/:queue_id", get(get_scan_result))
         .route("/capability/:agent_id", get(capability_trajectory_handler))
+        .route("/mcp/inspect", post(mcp_inspect))
         .route("/auth/admin/login", post(admin_login))
         .route("/auth/admin/logout", post(admin_logout))
         .route("/auth/admin/me", get(admin_me))
+        // ── Phase 2: Agent registry ──
+        .route("/admin/agents/register", post(admin_register_agent))
+        .route("/admin/agents/unregister", post(admin_unregister_agent))
+        // ── Phase 3: Force-halt kill switch ──
+        .route("/admin/force-halt/:agent_id", post(admin_force_halt))
+        .route("/admin/emergency-containment", post(emergency_containment))
+        .route("/admin/webhook/policy-sync", post(webhook_policy_sync))
+        .route("/audit/fts", post(audit_fts_search))
+        .route("/admin/policy-db/reload", post(admin_policy_db_reload))
 }
 
 /// Maximum allowed request body size (10 MB).
@@ -1088,8 +1794,11 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(api_routes())
         .nest("/v1", api_routes())
         .layer(axum::extract::DefaultBodyLimit::max(MAX_BODY_SIZE))
-        .layer(middleware::from_fn(rate_limit_middleware))
         .layer(middleware::from_fn(security_middleware))
+        .layer(middleware::from_fn(rate_limit_middleware))
+        // Keep validate ingress gate outermost so 429 can trigger before
+        // expensive auth/signature/DB paths during saturation.
+        .layer(middleware::from_fn(validate_ingress_middleware))
         .layer(cors)
         .with_state(state)
 }
