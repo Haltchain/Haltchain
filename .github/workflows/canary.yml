@@ -13,14 +13,13 @@ env:
 jobs:
   canary:
     name: Adversarial Canary Suite
-    runs-on: ubuntu-latest'
+    runs-on: ubuntu-latest
 
-    
     timeout-minutes: 20
 
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: haltchain_test
           POSTGRES_USER: haltchain
@@ -40,8 +39,17 @@ jobs:
         env:
           PGPASSWORD: haltchain
         run: |
-          psql -h localhost -U haltchain -d haltchain_test -f migrations/001_decisions_and_feedback.sql
-          psql -h localhost -U haltchain -d haltchain_test -f migrations/002_compliance_resource_domains.sql
+          for f in \
+            migrations/001_decisions_and_feedback.sql \
+            migrations/002_compliance_resource_domains.sql \
+            migrations/003_adjustment_recommendations.sql \
+            migrations/004_capability_trajectory.sql \
+            migrations/005_admin_users.sql \
+            migrations/006_create_partitions.sql \
+            migrations/007_pgvector_embeddings.sql \
+            migrations/008_hash_chaining.sql; do
+            psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
+          done
 
       - name: Set up Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -62,6 +70,7 @@ jobs:
         env:
           DATABASE_URL: postgres://haltchain:haltchain@localhost/haltchain_test
           PORT: 8080
+          HALTCHAIN_EMBEDDING_TIER: developer
         run: |
           ./target/release/haltchain-api &
           echo "SERVER_PID=$!" >> "$GITHUB_ENV"

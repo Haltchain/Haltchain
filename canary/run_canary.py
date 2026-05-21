@@ -8,9 +8,7 @@ summary if any adversarial prompt is allowed through (false negative).
 Usage:
     python run_canary.py [--url http://localhost:8080]
 """
-
 from __future__ import annotations
-
 import argparse
 import hashlib
 import hmac
