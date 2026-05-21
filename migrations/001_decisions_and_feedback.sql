@@ -24,7 +24,7 @@ DO $$ BEGIN CREATE TYPE breaker_domain AS ENUM (
     'financial', 'privacy', 'security', 'operational'
 ); EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
--- ── Hot decisions (90-day rolling window) ─────────────────────────────────────
+-- ── Hot decisions (90-day rolling window) 
 -- Partitioned by decided_at month; partition management handled externally.
 
 CREATE TABLE IF NOT EXISTS decisions_hot (
@@ -53,7 +53,7 @@ CREATE INDEX ON decisions_hot (agent_id, decided_at DESC);
 CREATE INDEX ON decisions_hot (transaction_id);
 CREATE INDEX ON decisions_hot (decision, decided_at DESC);
 
--- ── Cold decisions (7-year compliance archive) ────────────────────────────────
+-- ── Cold decisions (7-year compliance archive) 
 -- One row per day per agent: Merkle root over that day's decisions_hot rows.
 
 CREATE TABLE IF NOT EXISTS decisions_cold (
@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS decisions_cold (
 
 CREATE INDEX ON decisions_cold (agent_id, period_date DESC);
 
--- ── Decision outcomes (human feedback) ───────────────────────────────────────
+-- ── Decision outcomes (human feedback) 
 -- Every circuit break or deny can receive a reviewer outcome.
 -- This is the raw signal for the feedback learning loop.
 
