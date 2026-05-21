@@ -176,6 +176,14 @@ app.get("/api/admin/audit-log", (req, res) =>
 app.get("/api/status/:agentId", (req, res) =>
   proxyWithJwt(req, res, `/status/${encodeURIComponent(req.params.agentId)}`, "GET"));
 
+app.get("/api/agent/improvement/lineage/:agentId", (req, res) =>
+  proxyWithJwt(
+    req,
+    res,
+    `/agent/improvement/lineage/${encodeURIComponent(req.params.agentId)}`,
+    "GET",
+  ));
+
 // ── Public pass-through routes ─────────────────────────────────────────────────
 
 app.get("/api/public-key", async (_req, res) => {
