@@ -26,7 +26,7 @@ pub fn extract_scopes(auth_header: &str) -> Vec<String> {
     use sha2::Sha256;
     let secret = match std::env::var("JWT_SECRET") {
         Ok(s) if !s.is_empty() => s,
-        _ => return vec![],  // No valid JWT_SECRET — reject all tokens
+        _ => return vec![], // No valid JWT_SECRET — reject all tokens
     };
     if let Ok(mut mac) = Hmac::<Sha256>::new_from_slice(secret.as_bytes()) {
         mac.update(header_payload.as_bytes());

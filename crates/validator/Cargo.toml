@@ -22,6 +22,7 @@ haltchain-queue      = { path = "../queue" }
 haltchain-signing    = { path = "../signing" }
 haltchain-merkle     = { path = "../merkle" }
 haltchain-db         = { path = "../db" }
+haltchain-mcp-guard  = { path = "../mcp-guard" }
 haltchain-anchor     = { path = "../anchor" }
 parking_lot          = { workspace = true }
 dashmap              = { workspace = true }

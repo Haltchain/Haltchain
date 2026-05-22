@@ -8,30 +8,30 @@ use std::{
 
 use chrono::Utc;
 use dashmap::DashMap;
-use haltchain_analytics::{
-    causal_testing::{
-        AgentAction as RewardAgentAction, AgentObservation as RewardAgentObservation,
-        AgentSnapshot as RewardAgentSnapshot, CausalInterventionTester, Environment,
-        InterventionOutcome, RewardFunction,
-    },
-    isolation_forest::{ANOMALY_THRESHOLD, IsolationForest},
-    reward_monitoring::{RewardAnomalyDetector, RewardEvent, ShortcutRisk, SolutionPath},
-};
-use haltchain_cache::{CachedDecision, DecisionCache};
+use haltchain_analytics::isolation_forest::{ANOMALY_THRESHOLD, IsolationForest};
+use haltchain_cache::dragonfly_client::{DragonflyClient, PolicyState};
+use haltchain_cache::{CacheStats, CachedDecision, DecisionCache};
 use haltchain_capability::{CapabilityClassifier, CapabilityRisk, Domain};
-use haltchain_cognitive::{CognitiveAssessment, CognitiveMonitor, ReasoningMetadata, Triage};
+use haltchain_cognitive::{
+    CognitiveAssessment, CognitiveMonitor, ReasoningMetadata, Triage, analyze_context,
+    classify_intent,
+};
 use haltchain_consensus::{
     CLUSTER_SIZE as CONSENSUS_CLUSTER_SIZE, QUORUM as CONSENSUS_QUORUM, QuorumDecision,
     QuorumRequest, QuorumTracker,
 };
 use haltchain_db::{
-    DbStore, DecisionOutcomeRecord, DecisionRecord, DriftLogRecord, PolicyAdjustmentRecord,
+    ActionEmbeddingRecord, DbBackend, DbStore, DecisionOutcomeRecord, DecisionRecord,
+    DriftLogRecord, PolicyAdjustmentRecord, SqliteStore, TelemetryRecord,
 };
 use haltchain_embeddings::{
     ActionMeta, ClarificationDecision, ClarificationProtocol, ConversationRecord,
-    ConversationStore, DriftAction, DriftScorer, EmbedPipeline, GoalStore, action_to_text,
+    ConversationStore, DriftAction, DriftScorer, EmbedPipeline, GoalStore, ModelKind,
+    action_to_text,
 };
 use haltchain_merkle::MerkleAccumulator;
+use haltchain_mcp_guard::McpGuard;
+use haltchain_mcp_guard::types::{Decision as McpDecision, McpToolCall};
 use haltchain_policy::{
     ActionContext, AggregateBreaker, CIRCUIT_BREAK_SECS, MAX_ACTIONS_PER_MINUTE, PolicyResult,
 };
@@ -39,8 +39,10 @@ use haltchain_queue::{DeepScanTask, ScanQueue, ScanResult, ScanStatus, TokioChan
 use haltchain_rules::{EvalContext, EvalDecision, PolicyHandle, RuleEvaluator, watch_policy};
 use haltchain_signing::SigningService;
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+pub mod agent_registry;
 pub mod agent_state;
 pub mod geo;
 pub mod improvement;
@@ -54,25 +56,6 @@ pub mod types;
 type RecipientTransfer = (Instant, String, f64);
 type RecipientTransferBucket = Mutex<Vec<RecipientTransfer>>;
 
-struct ValidatorRewardFunction;
-
-impl RewardFunction for ValidatorRewardFunction {
-    fn calculate(&self, action: &RewardAgentAction, observation: &RewardAgentObservation) -> f64 {
-        let action_score = (action.magnitude / 1000.0).clamp(0.0, 1.0);
-        (observation.progress * 0.7 + action_score * 0.3).clamp(0.0, 1.0)
-    }
-}
-
-struct ValidatorEnvironment;
-
-impl Environment for ValidatorEnvironment {
-    fn execute(&self, action: &RewardAgentAction) -> InterventionOutcome {
-        InterventionOutcome {
-            reward: (action.magnitude / 1000.0).clamp(0.0, 1.0),
-        }
-    }
-}
-
 use agent_state::{
     AgentState, AnomalyRetrainPlan, DEFAULT_MAX_EWMA_VELOCITY,
     DEFAULT_MAX_RECIPIENT_TOTAL_PER_MINUTE, build_embed_pipeline,
@@ -81,22 +64,111 @@ use improvement::{RecursiveAgentValidator, VersionStore};
 use review::{ReviewEntry, ReviewQueue};
 use thresholds::{PolicyVariant, ThresholdStore};
 
+fn cognitive_layer_enabled() -> bool {
+    match std::env::var("HALTCHAIN_COGNITIVE_DISABLED").as_deref() {
+        Ok("1") | Ok("true") | Ok("yes") | Ok("TRUE") => false,
+        _ => true,
+    }
+}
+
+fn request_org_id(metadata: &serde_json::Value) -> Option<Uuid> {
+    metadata
+        .get("haltchain_org")
+        .and_then(|v| v.as_str())
+        .and_then(|v| Uuid::parse_str(v).ok())
+}
+
+fn stable_agent_uuid(agent_id: &str) -> Uuid {
+    let digest = Sha256::digest(agent_id.as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(bytes)
+}
+
+fn mcp_context_hash(req: &ValidationRequest) -> String {
+    let stable_metadata = req
+        .metadata
+        .as_object()
+        .map(|obj| {
+            let mut sanitized = obj.clone();
+            sanitized.remove("request_nonce");
+            sanitized.remove("request_sig");
+            sanitized.remove("request_timestamp");
+            serde_json::Value::Object(sanitized)
+        })
+        .unwrap_or_else(|| req.metadata.clone());
+
+    let context = serde_json::json!({
+        "agent_id": &req.agent_id,
+        "action": {
+            "type": &req.action.action_type,
+            "amount": req.action.amount,
+            "currency": &req.action.currency,
+            "recipient": &req.action.recipient,
+            "endpoint": &req.action.endpoint,
+            "method": &req.action.method,
+            "device_id": &req.action.device_id,
+            "command": &req.action.command,
+            "delegation_depth": req.action.delegation_depth,
+            "data_source": format!("{:?}", &req.action.data_source),
+        },
+        "session_id": &req.session_id,
+        "metadata": stable_metadata,
+    });
+    format!("{:x}", Sha256::digest(context.to_string().as_bytes()))
+}
+
+fn goal_intent_signal(goal: &str, intent_score: f64, research_score: f64) -> f64 {
+    let lower = goal.to_ascii_lowercase();
+    let keyword_boost = if lower.contains("exfil")
+        || lower.contains("credential")
+        || lower.contains("token")
+        || lower.contains("system prompt")
+        || lower.contains("bypass")
+        || lower.contains("privilege")
+        || lower.contains("sudo")
+    {
+        0.35
+    } else {
+        0.0
+    };
+
+    let base = if (intent_score + research_score) > 0.0 {
+        intent_score / (intent_score + research_score)
+    } else {
+        0.0
+    };
+
+    (base + keyword_boost).clamp(0.0, 1.0)
+}
+
 // Re-export public types for callers (maintains backward compatibility).
 pub use improvement::{
     AdversarialSuiteResult, AgentVersion, ImprovementDecision, SandboxResult, VersionDiff,
     VersionDiffSummary, VersionLineageEntry,
 };
+pub use haltchain_mcp_guard::types::{Decision as McpInspectDecision, McpToolCall as McpInspectToolCall};
 pub use types::{
     ActionPayload, AdjustmentRecommendation, AgentStatus, ApproveRecommendationRequest,
-    CreateVariantReq, Decision, DriftStatus, IntentRecord, LearningRunReport,
+    CreateVariantReq, DataSource, Decision, DriftStatus, IntentRecord, LearningRunReport,
     RejectRecommendationRequest, ReportIntentRequest, RevertRecommendationRequest, RiskAdvisory,
     ScanTier, ThresholdPatch, ValidationRequest, ValidationResponse,
 };
+
+/// Deployment profile controlling resource expectations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeployProfile {
+    /// Full cluster mode — expects Postgres, optional ONNX / remote embeddings.
+    Full,
+    /// Standalone single-binary — no DB, in-memory cache, hash-projection embeddings.
+    Standalone,
+}
 
 /// Thread-safe, cheaply-cloneable handle injected into every Axum route.
 pub struct AppState {
     agents: DashMap<String, Arc<tokio::sync::Mutex<AgentState>>>,
     cache: DecisionCache,
+    remote_cache: Option<Arc<DragonflyClient>>,
     rules_handle: Option<PolicyHandle>,
     // ── Week 4: goal / drift / clarification ──
     pub goal_store: GoalStore,
@@ -108,7 +180,7 @@ pub struct AppState {
     pub signing: SigningService,
     pub merkle: MerkleAccumulator,
     // ── P2: Postgres persistence ──
-    pub db: Option<Arc<DbStore>>,
+    pub db: Option<Arc<DbBackend>>,
     // ── P2: Human-in-the-loop + dynamic thresholds ──
     pub review_queue: ReviewQueue,
     pub thresholds: ThresholdStore,
@@ -125,10 +197,13 @@ pub struct AppState {
     node_id: u64,
     cluster_size: usize,
     // ── Cognitive firewall ──
+    pub cognitive_enabled: bool,
     pub cognitive: CognitiveMonitor,
     pub capability: Arc<CapabilityClassifier>,
     // ── Phase 8: async deep-scan queue ──
     pub scan_queue: Arc<TokioChannelQueue>,
+    // ── Phase 1b: MCP guard ──
+    pub mcp_guard: Option<Arc<McpGuard>>,
     // ── Recursive self-improvement validation ──
     pub version_store: VersionStore,
 }
@@ -138,26 +213,37 @@ impl AppState {
         Self::new_with_db(None)
     }
 
-    /// Async constructor that auto-connects to Postgres if DATABASE_URL is set.
+    /// Async constructor: Postgres from `DATABASE_URL` when set; on failure (or unset) falls back to SQLite (`db.sqlite` or `HALTCHAIN_SQLITE_FALLBACK_PATH`).
     pub async fn new_async() -> Arc<Self> {
-        let db = match std::env::var("DATABASE_URL") {
-            Ok(url) => match DbStore::connect(&url).await {
+        let mut db: Option<Arc<DbBackend>> = None;
+        if let Ok(url) = std::env::var("DATABASE_URL") {
+            if !url.trim().is_empty() {
+                match DbStore::connect(&url).await {
+                    Ok(store) => {
+                        tracing::info!("connected to postgres");
+                        db = Some(Arc::new(DbBackend::Postgres(store)));
+                    }
+                    Err(e) => {
+                        tracing::warn!("DATABASE_URL present but postgres unreachable: {e}");
+                    }
+                }
+            }
+        }
+        if db.is_none() {
+            let path = std::env::var("HALTCHAIN_SQLITE_FALLBACK_PATH")
+                .unwrap_or_else(|_| "db.sqlite".to_string());
+            match SqliteStore::connect(&path).await {
                 Ok(store) => {
-                    tracing::info!("connected to postgres");
-                    Some(Arc::new(store))
+                    tracing::info!(path, "sqlite fallback (admin login + audit tables)");
+                    db = Some(Arc::new(DbBackend::Sqlite(store)));
                 }
-                Err(e) => {
-                    tracing::warn!("postgres unavailable, running without persistence: {e}");
-                    None
-                }
-            },
-            Err(_) => None,
-        };
+                Err(e) => tracing::warn!("sqlite fallback failed ({path}): {e}"),
+            }
+        }
         Self::new_with_db(db)
     }
 
-    pub fn new_with_db(db: Option<Arc<DbStore>>) -> Arc<Self> {
-        // Load YAML rules from POLICY_FILE env var if set (C3 fix).
+    pub fn new_with_db(db: Option<Arc<DbBackend>>) -> Arc<Self> {
         let rules_handle = std::env::var("POLICY_FILE").ok().and_then(|path| {
             watch_policy(&path)
                 .map_err(|e| tracing::warn!("failed to load POLICY_FILE {path}: {e}"))
@@ -171,9 +257,12 @@ impl AppState {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(1);
+        let remote_cache = Self::remote_cache_from_env();
+        let mcp_guard = Self::mcp_guard_from_db(&db, remote_cache.as_ref());
         Arc::new(Self {
             agents: DashMap::new(),
             cache: DecisionCache::new(),
+            remote_cache,
             rules_handle,
             goal_store: GoalStore::new(),
             embed_pipeline: build_embed_pipeline(),
@@ -195,9 +284,71 @@ impl AppState {
             recipient_transfers: DashMap::new(),
             node_id,
             cluster_size,
+            cognitive_enabled: cognitive_layer_enabled(),
             cognitive: CognitiveMonitor::new(),
             capability: Arc::new(CapabilityClassifier::default()),
             scan_queue: TokioChannelQueue::new(1024),
+            mcp_guard,
+            version_store: VersionStore::new(),
+        })
+    }
+
+    /// Standalone single-binary mode: SQLite audit log, hash embeddings,
+    /// in-memory cache.  Intended for `--profile standalone`.
+    ///
+    /// SQLite database path is read from `HALTCHAIN_SQLITE_PATH`
+    /// (default: `haltchain.db` in the working directory).
+    pub async fn new_standalone() -> Arc<Self> {
+        let rules_handle = std::env::var("POLICY_FILE").ok().and_then(|path| {
+            watch_policy(&path)
+                .map_err(|e| tracing::warn!("failed to load POLICY_FILE {path}: {e}"))
+                .ok()
+        });
+        let sqlite_path =
+            std::env::var("HALTCHAIN_SQLITE_PATH").unwrap_or_else(|_| "haltchain.db".to_string());
+        let db: Option<Arc<DbBackend>> =
+            match SqliteStore::connect(&sqlite_path).await.map_err(|e| {
+                tracing::warn!("sqlite unavailable ({e}), standalone running without persistence");
+            }) {
+                Ok(store) => {
+                    tracing::info!(sqlite_path, "standalone: SQLite audit log connected");
+                    Some(Arc::new(DbBackend::Sqlite(store)))
+                }
+                Err(()) => None,
+            };
+        tracing::info!("standalone mode: SQLite persistence, hash-projection embeddings");
+        let remote_cache = Self::remote_cache_from_env();
+        let mcp_guard = Self::mcp_guard_from_db(&db, remote_cache.as_ref());
+        Arc::new(Self {
+            agents: DashMap::new(),
+            cache: DecisionCache::new(),
+            remote_cache,
+            rules_handle,
+            goal_store: GoalStore::new(),
+            embed_pipeline: EmbedPipeline::new(ModelKind::standalone_or_hash()),
+            drift_scorer: Mutex::new(DriftScorer::default()),
+            conversation_store: ConversationStore::new(),
+            clarification: ClarificationProtocol::default(),
+            signing: SigningService::generate(),
+            merkle: MerkleAccumulator::new(),
+            db,
+            review_queue: ReviewQueue::new(),
+            thresholds: ThresholdStore::new(),
+            aggregate_breaker: AggregateBreaker::default_any(),
+            rule_evaluator_cache: Mutex::new(None),
+            intent_store: DashMap::new(),
+            recommendations: DashMap::new(),
+            next_recommendation_id: AtomicI64::new(1),
+            risk_advisories: DashMap::new(),
+            next_risk_advisory_id: AtomicI64::new(1),
+            recipient_transfers: DashMap::new(),
+            node_id: 1,
+            cluster_size: 1,
+            cognitive_enabled: cognitive_layer_enabled(),
+            cognitive: CognitiveMonitor::new(),
+            capability: Arc::new(CapabilityClassifier::default()),
+            scan_queue: TokioChannelQueue::new(1024),
+            mcp_guard,
             version_store: VersionStore::new(),
         })
     }
@@ -211,9 +362,12 @@ impl AppState {
             .ok()
             .and_then(|v| v.parse::<usize>().ok())
             .unwrap_or(1);
+        let remote_cache = Self::remote_cache_from_env();
+        let mcp_guard = Self::mcp_guard_from_db(&None, remote_cache.as_ref());
         Arc::new(Self {
             agents: DashMap::new(),
             cache: DecisionCache::new(),
+            remote_cache,
             rules_handle: Some(rules_handle),
             goal_store: GoalStore::new(),
             embed_pipeline: build_embed_pipeline(),
@@ -235,11 +389,80 @@ impl AppState {
             recipient_transfers: DashMap::new(),
             node_id,
             cluster_size,
+            cognitive_enabled: cognitive_layer_enabled(),
             cognitive: CognitiveMonitor::new(),
             capability: Arc::new(CapabilityClassifier::default()),
             scan_queue: TokioChannelQueue::new(1024),
+            mcp_guard,
             version_store: VersionStore::new(),
         })
+    }
+
+    /// Push a new policy, bumping the generation counter.
+    /// Used by the GitOps webhook to hot-swap policy YAML.
+    ///
+    /// Returns `true` if the policy handle is present and the policy was applied.
+    /// Returns `false` when the server was started without a `POLICY_FILE`
+    /// (i.e. `rules_handle` is `None`), meaning the push is a no-op and the
+    /// caller **must** return an error to the client instead of 200 OK.
+    pub fn push_policy(&self, pf: haltchain_rules::PolicyFile) -> bool {
+        if let Some(handle) = &self.rules_handle {
+            handle.store(pf);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn remote_cache_from_env() -> Option<Arc<DragonflyClient>> {
+        let url = std::env::var("HALTCHAIN_DRAGONFLY_URL")
+            .ok()
+            .or_else(|| std::env::var("DRAGONFLY_URL").ok())?;
+
+        let trimmed = url.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        tracing::info!(url = trimmed, "DragonflyDB remote cache configured");
+        Some(Arc::new(DragonflyClient::new(trimmed.to_string())))
+    }
+
+    fn mcp_guard_from_db(
+        db: &Option<Arc<DbBackend>>,
+        remote_cache: Option<&Arc<DragonflyClient>>,
+    ) -> Option<Arc<McpGuard>> {
+        let pool = db.as_ref().and_then(|backend| backend.pool()).cloned()?;
+        let cache = remote_cache.cloned();
+        Some(Arc::new(McpGuard::from_env(pool, cache)))
+    }
+
+    pub async fn inspect_mcp_tool_call(
+        &self,
+        call: &McpToolCall,
+    ) -> Result<McpDecision, String> {
+        match &self.mcp_guard {
+            Some(guard) => guard.inspect_tool_call(call).await.map_err(|e| e.to_string()),
+            None => Err("MCP guard unavailable".to_string()),
+        }
+    }
+
+    pub fn cache_stats(&self) -> CacheStats {
+        self.cache.stats()
+    }
+
+    pub fn remote_cache_metrics_text(&self) -> Option<String> {
+        self.remote_cache
+            .as_ref()
+            .map(|cache| cache.metrics.prometheus_text())
+    }
+
+    /// Current policy generation (monotonic counter).
+    pub fn policy_generation(&self) -> u64 {
+        self.rules_handle
+            .as_ref()
+            .map(|h| h.generation())
+            .unwrap_or(0)
     }
 
     fn evaluate_recipient_aggregate(
@@ -328,20 +551,49 @@ impl AppState {
     }
 
     pub fn cognitive_assessment(&self, trace: &str) -> CognitiveAssessment {
+        if !self.cognitive_enabled {
+            return CognitiveAssessment::Proceed;
+        }
         self.cognitive.deep_scan(trace)
+    }
+
+    pub async fn readiness_check(&self) -> Result<(), String> {
+        if let Some(db) = &self.db {
+            db.ping().await.map_err(|e| format!("database: {e}"))?;
+        }
+        Ok(())
+    }
+
+    pub async fn extension_health(&self) -> std::collections::HashMap<String, bool> {
+        if let Some(db) = &self.db {
+            if let Some(pg) = db.as_postgres() {
+                return pg.extension_health().await;
+            }
+        }
+        std::collections::HashMap::new()
+    }
+
+    pub async fn embedding_probe(&self) -> Result<(), String> {
+        self.embed_pipeline
+            .embed_cached("__haltchain_probe__")
+            .await
+            .map_err(|e| format!("embedding: {e}"))?;
+        Ok(())
     }
 
     pub fn capability_risk(&self, agent_id: &str) -> Option<CapabilityRisk> {
         self.capability.periodic_assessment(agent_id)
     }
 
-    /// Drain the capability WAL and persist to Postgres (no-op if db is None).
+    /// Drain the capability WAL and persist to Postgres (no-op if db is None or SQLite).
     pub async fn flush_capability_wal(&self) {
         if let Some(db) = &self.db {
-            match self.capability.store().flush_to_db(db).await {
-                Ok(0) => {}
-                Ok(n) => tracing::debug!(flushed = n, "capability WAL flushed"),
-                Err(e) => tracing::warn!("capability WAL flush failed: {e}"),
+            if let Some(pg_db) = db.as_postgres() {
+                match self.capability.store().flush_to_db(pg_db).await {
+                    Ok(0) => {}
+                    Ok(n) => tracing::debug!(flushed = n, "capability WAL flushed"),
+                    Err(e) => tracing::warn!("capability WAL flush failed: {e}"),
+                }
             }
         }
     }
@@ -390,7 +642,11 @@ impl AppState {
         tokio::spawn(async move {
             loop {
                 if let Some(task) = state.scan_queue.dequeue().await {
-                    let assessment = state.cognitive.deep_scan(&task.reasoning_trace);
+                    let assessment = if state.cognitive_enabled {
+                        state.cognitive.deep_scan(&task.reasoning_trace)
+                    } else {
+                        CognitiveAssessment::Proceed
+                    };
                     let (status, summary) = match &assessment {
                         CognitiveAssessment::Proceed => {
                             (ScanStatus::Proceed, "no threat detected".to_string())
@@ -437,7 +693,23 @@ impl AppState {
             resp.decision.as_str(),
             &envelope.signature,
         );
+
+        // COSE Sign1 decision envelope (Section C — Cryptographic Audit Layer)
+        let policy_version = self
+            .rules_handle
+            .as_ref()
+            .map(|h| h.load().version)
+            .unwrap_or_else(|| "0.0.0".to_string());
+        let decision_envelope = self.signing.sign_decision(
+            &resp.transaction_id,
+            resp.decision.as_str(),
+            agent_id,
+            &resp.timestamp,
+            &policy_version,
+        );
+
         resp.sig = Some(envelope);
+        resp.decision_envelope = Some(decision_envelope);
         resp
     }
 
@@ -473,12 +745,39 @@ impl AppState {
 
     /// Full validation pipeline for a single request.
     pub async fn validate(self: &Arc<Self>, req: &ValidationRequest) -> ValidationResponse {
-        let resp = self.validate_inner(req).await;
+        let started_at = Instant::now();
+        let mut pending_drift: Option<DriftLogRecord> = None;
+        let resp = self.validate_inner(req, &mut pending_drift).await;
         let resp = self.finalize_response(resp, &req.agent_id);
+        let decision_org_id = request_org_id(&req.metadata);
+        let latency_us = started_at.elapsed().as_micros() as f64;
+
+        let action_embedding = if self.db.as_ref().and_then(|db| db.as_postgres()).is_some() {
+            let action_text = action_to_text(&ActionMeta {
+                action_type: &req.action.action_type,
+                amount: req.action.amount,
+                currency: req.action.currency.as_deref(),
+                recipient: req.action.recipient.as_deref(),
+                endpoint: req.action.endpoint.as_deref(),
+                method: req.action.method.as_deref(),
+                command: req.action.command.as_deref(),
+            });
+            match self.embed_pipeline.embed_cached(&action_text).await {
+                Ok(emb) => Some(emb.into_iter().map(|v| v as f32).collect()),
+                Err(e) => {
+                    tracing::warn!(agent_id = %req.agent_id, error = %e, "hot-path action embedding failed");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         if let Some(db) = &self.db {
             let record = DecisionRecord {
                 transaction_id: Uuid::parse_str(&resp.transaction_id)
                     .unwrap_or_else(|_| Uuid::new_v4()),
+                org_id: decision_org_id,
                 agent_id: req.agent_id.clone(),
                 decision: resp.decision.as_str().to_string(),
                 domain: None,
@@ -501,11 +800,56 @@ impl AppState {
                     .get("request_sig")
                     .and_then(|v| v.as_str())
                     .map(str::to_string),
+                decided_at: chrono::DateTime::parse_from_rfc3339(&resp.timestamp)
+                    .ok()
+                    .map(|dt| dt.with_timezone(&Utc)),
             };
             let db = Arc::clone(db);
+            let drift_opt = pending_drift.take();
+            let tx_id = record.transaction_id;
+            let metric_tags = serde_json::json!({
+                "decision": resp.decision.as_str(),
+                "policy": resp.policy.clone(),
+                "source": "validator_hot_path"
+            });
+            let telemetry = TelemetryRecord {
+                org_id: decision_org_id,
+                agent_id: req.agent_id.clone(),
+                metric: "validation_latency_us".to_string(),
+                value: latency_us,
+                tags: Some(metric_tags),
+            };
+            let embedding_record = action_embedding.map(|embedding| ActionEmbeddingRecord {
+                org_id: decision_org_id,
+                agent_id: req.agent_id.clone(),
+                session_id: req.session_id.clone(),
+                transaction_id: Some(tx_id),
+                embedding,
+                goal_similarity: drift_opt
+                    .as_ref()
+                    .map(|d| (1.0_f64 - d.semantic_drift).clamp(0.0, 1.0)),
+                label: Some(resp.decision.as_str().to_ascii_lowercase()),
+            });
             tokio::spawn(async move {
-                if let Err(e) = db.insert_decision(&record).await {
+                let res = if let Some(ref d) = drift_opt {
+                    db.insert_decision_with_drift(&record, d).await
+                } else {
+                    db.insert_decision(&record).await
+                };
+                if let Err(e) = res {
                     tracing::warn!("decision persist failed: {e}");
+                    return;
+                }
+
+                if let Some(pg_db) = db.as_postgres() {
+                    if let Err(e) = pg_db.insert_telemetry_hot(&telemetry).await {
+                        tracing::warn!("telemetry_hot persist failed: {e}");
+                    }
+                    if let Some(embedding_record) = embedding_record.as_ref() {
+                        if let Err(e) = pg_db.insert_action_embedding(embedding_record).await {
+                            tracing::warn!("action_embedding persist failed: {e}");
+                        }
+                    }
                 }
             });
         }
@@ -524,13 +868,140 @@ impl AppState {
         resp
     }
 
-    async fn validate_inner(self: &Arc<Self>, req: &ValidationRequest) -> ValidationResponse {
+    async fn validate_inner(
+        self: &Arc<Self>,
+        req: &ValidationRequest,
+        pending_drift: &mut Option<DriftLogRecord>,
+    ) -> ValidationResponse {
         let transaction_id = Uuid::new_v4().to_string();
         let timestamp = Utc::now().to_rfc3339();
         // Populated by Maximum tier cognitive check; attached to final Allow.
         let mut cap_risk_value: Option<serde_json::Value> = None;
 
-        // ── Cache check ──────────────────────────────────────────────────────
+        //Shadow agent check
+        if let Err(reason) = agent_registry::AgentRegistry::global().check(&req.agent_id) {
+            return ValidationResponse {
+                decision: Decision::Deny,
+                transaction_id,
+                timestamp,
+                circuit_breaker_active: false,
+                reason: Some(reason),
+                policy: Some("UNREGISTERED_AGENT".into()),
+                actions_this_minute: 0,
+                rate_limit: MAX_ACTIONS_PER_MINUTE,
+                deferred_scan_id: None,
+                capability_risk: None,
+                sig: None,
+                decision_envelope: None,
+            };
+        }
+
+        if let Some(org_id) = request_org_id(&req.metadata) {
+            let Some(mcp_guard) = self.mcp_guard.as_ref() else {
+                return ValidationResponse {
+                    decision: Decision::Deny,
+                    transaction_id,
+                    timestamp,
+                    circuit_breaker_active: false,
+                    reason: Some("MCP guard unavailable".to_string()),
+                    policy: Some("MCP_GUARD_UNAVAILABLE".into()),
+                    actions_this_minute: 0,
+                    rate_limit: MAX_ACTIONS_PER_MINUTE,
+                    deferred_scan_id: None,
+                    capability_risk: None,
+                    sig: None,
+                    decision_envelope: None,
+                };
+            };
+
+            let mcp_call = McpToolCall {
+                agent_id: stable_agent_uuid(&req.agent_id),
+                org_id,
+                tool_name: req.action.action_type.clone(),
+                tool_args: serde_json::json!({
+                    "amount": req.action.amount,
+                    "currency": &req.action.currency,
+                    "recipient": &req.action.recipient,
+                    "endpoint": &req.action.endpoint,
+                    "method": &req.action.method,
+                    "command": &req.action.command,
+                    "metadata": &req.metadata,
+                }),
+                context_hash: mcp_context_hash(req),
+                timestamp: Utc::now().timestamp(),
+            };
+
+            match mcp_guard.inspect_tool_call(&mcp_call).await {
+                Ok(McpDecision::Allow) => {}
+                Ok(McpDecision::Block { reason, intent }) => {
+                    return ValidationResponse {
+                        decision: Decision::Deny,
+                        transaction_id,
+                        timestamp,
+                        circuit_breaker_active: false,
+                        reason: Some(match intent {
+                            Some(intent) => {
+                                format!("MCP blocked tool call: {reason} (intent={intent})")
+                            }
+                            None => format!("MCP blocked tool call: {reason}"),
+                        }),
+                        policy: Some("MCP_BLOCK".into()),
+                        actions_this_minute: 0,
+                        rate_limit: MAX_ACTIONS_PER_MINUTE,
+                        deferred_scan_id: None,
+                        capability_risk: None,
+                        sig: None,
+                        decision_envelope: None,
+                    };
+                }
+                Ok(McpDecision::Quarantine {
+                    review_id,
+                    reason,
+                    intent,
+                }) => {
+                    return ValidationResponse {
+                        decision: Decision::Deny,
+                        transaction_id,
+                        timestamp,
+                        circuit_breaker_active: false,
+                        reason: Some(match intent {
+                            Some(intent) => format!(
+                                "MCP quarantined tool call for human review: {review_id} ({reason}, intent={intent})"
+                            ),
+                            None => format!(
+                                "MCP quarantined tool call for human review: {review_id} ({reason})"
+                            ),
+                        }),
+                        policy: Some("MCP_QUARANTINE".into()),
+                        actions_this_minute: 0,
+                        rate_limit: MAX_ACTIONS_PER_MINUTE,
+                        deferred_scan_id: None,
+                        capability_risk: None,
+                        sig: None,
+                        decision_envelope: None,
+                    };
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, agent_id = %req.agent_id, "mcp guard failed");
+                    return ValidationResponse {
+                        decision: Decision::Deny,
+                        transaction_id,
+                        timestamp,
+                        circuit_breaker_active: false,
+                        reason: Some("MCP guard inspection failed".to_string()),
+                        policy: Some("MCP_GUARD_ERROR".into()),
+                        actions_this_minute: 0,
+                        rate_limit: MAX_ACTIONS_PER_MINUTE,
+                        deferred_scan_id: None,
+                        capability_risk: None,
+                        sig: None,
+                        decision_envelope: None,
+                    };
+                }
+            }
+        }
+
+        // Cache check
         let amount_bucket = req
             .action
             .amount
@@ -549,8 +1020,28 @@ impl AppState {
             amount_bucket,
             action_count_bucket,
         );
-        if req.action.amount.is_none()
-            && let Some(cached) = self.cache.get(&cache_key)
+        let cached_allow = if req.action.amount.is_none() {
+            if let Some(cached) = self.cache.get(&cache_key) {
+                Some(cached)
+            } else if let Some(remote_cache) = &self.remote_cache {
+                match remote_cache.get(&cache_key).await {
+                    Some(cached) => {
+                        self.cache.insert_for(
+                            cache_key.clone(),
+                            cached.clone(),
+                            Some(&req.agent_id),
+                        );
+                        Some(cached)
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(cached) = cached_allow
             && cached.decision == "ALLOW"
         {
             // Verify the circuit breaker hasn't tripped since this entry was cached (TOCTOU fix).
@@ -576,6 +1067,7 @@ impl AppState {
                     deferred_scan_id: None,
                     capability_risk: None,
                     sig: None,
+                    decision_envelope: None,
                 };
             }
             let actions = agent.current_action_count();
@@ -591,6 +1083,7 @@ impl AppState {
                 deferred_scan_id: None,
                 capability_risk: None,
                 sig: None,
+                decision_envelope: None,
             };
         }
 
@@ -618,6 +1111,7 @@ impl AppState {
                 deferred_scan_id: None,
                 capability_risk: None,
                 sig: None,
+                decision_envelope: None,
             };
         }
 
@@ -626,11 +1120,21 @@ impl AppState {
             .amount
             .map(|amount| agent.observe_signal(amount, req.action.recipient.as_deref()))
             .unwrap_or((None, None));
+        // Apply data-source threat multiplier so untrusted sources trip anomaly
+        // detection more easily.
+        let anomaly_result = anomaly_result.map(|mut r| {
+            let m = req.action.data_source.threat_multiplier();
+            if m != 1.0 {
+                r.score *= m;
+                r.is_anomaly = r.score > ANOMALY_THRESHOLD;
+            }
+            r
+        });
         if let Some(plan) = retrain_plan {
             self.schedule_anomaly_retrain(req.agent_id.clone(), plan);
         }
 
-        // ── YAML rule evaluation (Week 3) ────────────────────────────────────
+        //  YAML rule evaluation
         if let Some(handle) = &self.rules_handle {
             let policy_gen = handle.generation();
             let evaluator_opt: Option<std::sync::Arc<RuleEvaluator>> = {
@@ -653,6 +1157,10 @@ impl AppState {
             if let Some(evaluator) = evaluator_opt {
                 let amount = req.action.amount.unwrap_or(0.0);
                 let ewma = agent.tracker.ewma_velocity();
+                // ── Compliance pack fields from request metadata ──────────────────
+                // These map directly to GDPR/PCI-DSS/HIPAA/EU AI Act rule conditions.
+                // Callers pass them in the `metadata` object of the request body.
+                let meta = &req.metadata;
                 let ctx = EvalContext {
                     agent_id: req.agent_id.clone(),
                     action_type: req.action.action_type.clone(),
@@ -665,6 +1173,31 @@ impl AppState {
                     is_anomaly: anomaly_result
                         .as_ref()
                         .map(|r| r.is_anomaly)
+                        .unwrap_or(false),
+                    delegation_depth: req.action.delegation_depth.unwrap_or(0),
+                    pii_field_count: meta
+                        .get("pii_field_count")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize,
+                    gdpr_deletion_requested: meta
+                        .get("gdpr_deletion_requested")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    cross_border_restricted: meta
+                        .get("cross_border_restricted")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    retention_days_requested: meta
+                        .get("retention_days_requested")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32,
+                    accessing_undeclared_service: meta
+                        .get("accessing_undeclared_service")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false),
+                    payload_contains_pii: meta
+                        .get("payload_contains_pii")
+                        .and_then(|v| v.as_bool())
                         .unwrap_or(false),
                 };
                 match evaluator.evaluate(&ctx) {
@@ -683,6 +1216,7 @@ impl AppState {
                             deferred_scan_id: None,
                             capability_risk: None,
                             sig: None,
+                            decision_envelope: None,
                         };
                     }
                     (EvalDecision::CircuitBreak { rule_id, message }, _) => {
@@ -704,6 +1238,7 @@ impl AppState {
                             deferred_scan_id: None,
                             capability_risk: None,
                             sig: None,
+                            decision_envelope: None,
                         };
                     }
                     _ => {} // Allow / FlaggedAllow → continue to hardcoded checks
@@ -749,6 +1284,7 @@ impl AppState {
                     deferred_scan_id: None,
                     capability_risk: None,
                     sig: None,
+                    decision_envelope: None,
                 };
             }
         }
@@ -769,23 +1305,15 @@ impl AppState {
                 embedding: convo_embedding,
             })
         {
-            if let Some(db) = &self.db {
-                let db = Arc::clone(db);
-                let rec = DriftLogRecord {
-                    agent_id: report.agent_id.clone(),
-                    conversation_id: conversation_id.clone(),
-                    semantic_drift: report.semantic_drift,
-                    drift_velocity: report.drift_velocity,
-                    window_len: report.window_len as i32,
-                    baseline_len: report.baseline_len as i32,
-                    recommendation: format!("{:?}", report.recommendation),
-                };
-                tokio::spawn(async move {
-                    if let Err(e) = db.insert_drift_log(&rec).await {
-                        tracing::warn!("conversation drift persistence failed: {e}");
-                    }
-                });
-            }
+            *pending_drift = Some(DriftLogRecord {
+                agent_id: report.agent_id.clone(),
+                conversation_id: conversation_id.clone(),
+                semantic_drift: report.semantic_drift,
+                drift_velocity: report.drift_velocity,
+                window_len: report.window_len as i32,
+                baseline_len: report.baseline_len as i32,
+                recommendation: format!("{:?}", report.recommendation),
+            });
 
             if matches!(
                 report.recommendation,
@@ -808,6 +1336,7 @@ impl AppState {
                     deferred_scan_id: None,
                     capability_risk: None,
                     sig: None,
+                    decision_envelope: None,
                 };
             }
         }
@@ -821,54 +1350,58 @@ impl AppState {
             .unwrap_or_default();
 
         if let Some(trace) = req.metadata.get("reasoning_trace").and_then(|v| v.as_str()) {
-            // Always record for capability accumulation tracking
             self.capability.update_trajectory(&req.agent_id, trace);
 
-            match tier {
-                ScanTier::Essential => {} // fast path, skip cognitive check
-                ScanTier::Standard => {
-                    let meta = ReasoningMetadata::from_trace(trace);
-                    if self.cognitive.triage(&meta, trace) == Triage::DeepScanRequired {
-                        let session = req.session_id.as_deref().unwrap_or(&transaction_id);
-                        let task = DeepScanTask::new(&req.agent_id, session, trace, None);
-                        let task_id = task.task_id.to_string();
-                        let _ = self.scan_queue.enqueue(task).await;
-                        let actions = agent.current_action_count();
-                        return ValidationResponse {
-                            decision: Decision::Allow,
-                            transaction_id,
-                            timestamp,
-                            circuit_breaker_active: false,
-                            reason: None,
-                            policy: None,
-                            actions_this_minute: actions,
-                            rate_limit: MAX_ACTIONS_PER_MINUTE,
-                            deferred_scan_id: Some(task_id),
-                            capability_risk: None,
-                            sig: None,
-                        };
+            if self.cognitive_enabled {
+                match tier {
+                    ScanTier::Essential => {}
+                    ScanTier::Standard => {
+                        let meta = ReasoningMetadata::from_trace(trace);
+                        if self.cognitive.triage(&meta, trace) == Triage::DeepScanRequired {
+                            let session = req.session_id.as_deref().unwrap_or(&transaction_id);
+                            let task = DeepScanTask::new(&req.agent_id, session, trace, None);
+                            let task_id = task.task_id.to_string();
+                            let _ = self.scan_queue.enqueue(task).await;
+                            let actions = agent.current_action_count();
+                            return ValidationResponse {
+                                decision: Decision::Allow,
+                                transaction_id,
+                                timestamp,
+                                circuit_breaker_active: false,
+                                reason: None,
+                                policy: None,
+                                actions_this_minute: actions,
+                                rate_limit: MAX_ACTIONS_PER_MINUTE,
+                                deferred_scan_id: Some(task_id),
+                                capability_risk: None,
+                                sig: None,
+                                decision_envelope: None,
+                            };
+                        }
                     }
-                }
-                ScanTier::Maximum => {
-                    let meta = ReasoningMetadata::from_trace(trace);
-                    if self.cognitive.triage(&meta, trace) == Triage::DeepScanRequired
-                        && let CognitiveAssessment::HaltAndClarify { explanation, .. } =
-                            self.cognitive.deep_scan(trace)
-                    {
-                        let actions = agent.current_action_count();
-                        return ValidationResponse {
-                            decision: Decision::Deny,
-                            transaction_id,
-                            timestamp,
-                            circuit_breaker_active: false,
-                            reason: Some(explanation),
-                            policy: Some("COGNITIVE_THREAT".into()),
-                            actions_this_minute: actions,
-                            rate_limit: MAX_ACTIONS_PER_MINUTE,
-                            deferred_scan_id: None,
-                            capability_risk: None,
-                            sig: None,
-                        };
+                    ScanTier::Maximum => {
+                        let meta = ReasoningMetadata::from_trace(trace);
+                        if self.cognitive.triage(&meta, trace) == Triage::DeepScanRequired
+                            && let CognitiveAssessment::HaltAndClarify { explanation, .. } = self
+                                .cognitive
+                                .deep_scan_with_agent_refs(trace, agent.calibration_refs())
+                        {
+                            let actions = agent.current_action_count();
+                            return ValidationResponse {
+                                decision: Decision::Deny,
+                                transaction_id,
+                                timestamp,
+                                circuit_breaker_active: false,
+                                reason: Some(explanation),
+                                policy: Some("COGNITIVE_THREAT".into()),
+                                actions_this_minute: actions,
+                                rate_limit: MAX_ACTIONS_PER_MINUTE,
+                                deferred_scan_id: None,
+                                capability_risk: None,
+                                sig: None,
+                                decision_envelope: None,
+                            };
+                        }
                     }
                 }
             }
@@ -907,6 +1440,7 @@ impl AppState {
                 deferred_scan_id: None,
                 capability_risk: None,
                 sig: None,
+                decision_envelope: None,
             };
         }
 
@@ -934,6 +1468,7 @@ impl AppState {
                 deferred_scan_id: None,
                 capability_risk: None,
                 sig: None,
+                decision_envelope: None,
             };
         }
 
@@ -958,140 +1493,8 @@ impl AppState {
                 deferred_scan_id: None,
                 capability_risk: None,
                 sig: None,
+                decision_envelope: None,
             };
-        }
-
-        let reward_signal = req.metadata.get("reward_signal").and_then(|v| v.as_f64());
-        let task_progress = req.metadata.get("task_progress").and_then(|v| v.as_f64());
-        let reward_context_enabled = req
-            .metadata
-            .get("enable_reward_guard")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false)
-            || req.metadata.get("reward_signal").is_some()
-            || req.metadata.get("solution_steps").is_some()
-            || req.metadata.get("task_difficulty").is_some();
-        let reward_stream = build_reward_stream(agent.recent_amounts.make_contiguous(), reward_signal, task_progress);
-
-        if reward_context_enabled && reward_stream.len() >= 8 {
-            let baseline_streams = build_baseline_streams(&reward_stream);
-            let mut baseline_solutions = default_reward_baseline_solutions();
-            if let Some(solution_path) = parse_solution_path(&req.metadata) {
-                baseline_solutions.push(solution_path);
-            }
-            let reward_detector = RewardAnomalyDetector::fit(&baseline_streams, &baseline_solutions);
-            let reward_anomaly = reward_detector.evaluate_reward_stream(&reward_stream);
-            let reward_anomaly_threshold = req
-                .metadata
-                .get("reward_anomaly_threshold")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.80)
-                .clamp(0.0, 1.0);
-
-            if reward_anomaly.value >= reward_anomaly_threshold {
-                let reason = format!(
-                    "Reward anomaly {:.3} exceeded threshold {:.2}",
-                    reward_anomaly.value, reward_anomaly_threshold
-                );
-                agent.trip_circuit_breaker(Duration::from_secs(CIRCUIT_BREAK_SECS), reason.clone());
-                self.cache.invalidate_agent(&req.agent_id);
-                return ValidationResponse {
-                    decision: Decision::CircuitBreak,
-                    transaction_id,
-                    timestamp,
-                    circuit_breaker_active: true,
-                    reason: Some(reason),
-                    policy: Some("REWARD_ANOMALY_SCORE".into()),
-                    actions_this_minute: current_count,
-                    rate_limit: effective_rate_limit,
-                    deferred_scan_id: None,
-                    capability_risk: None,
-                    sig: None,
-                };
-            }
-
-            if let Some(solution_path) = parse_solution_path(&req.metadata) {
-                match reward_detector.detect_shortcuts(&solution_path) {
-                    ShortcutRisk::High { reason, .. } => {
-                        return ValidationResponse {
-                            decision: Decision::Deny,
-                            transaction_id,
-                            timestamp,
-                            circuit_breaker_active: false,
-                            reason: Some(reason),
-                            policy: Some("REWARD_SHORTCUT_HIGH".into()),
-                            actions_this_minute: current_count,
-                            rate_limit: effective_rate_limit,
-                            deferred_scan_id: None,
-                            capability_risk: None,
-                            sig: None,
-                        };
-                    }
-                    ShortcutRisk::Medium { reason, .. } => {
-                        return ValidationResponse {
-                            decision: Decision::Deny,
-                            transaction_id,
-                            timestamp,
-                            circuit_breaker_active: false,
-                            reason: Some(reason),
-                            policy: Some("REWARD_SHORTCUT_MEDIUM".into()),
-                            actions_this_minute: current_count,
-                            rate_limit: effective_rate_limit,
-                            deferred_scan_id: None,
-                            capability_risk: None,
-                            sig: None,
-                        };
-                    }
-                    ShortcutRisk::Low => {}
-                }
-            }
-
-            let side_signal = req
-                .metadata
-                .get("side_signal")
-                .and_then(|v| v.as_f64())
-                .unwrap_or(0.0)
-                .clamp(0.0, 1.0);
-            if reward_signal.is_some() || req.metadata.get("side_signal").is_some() {
-                let causal_tester = CausalInterventionTester::new(
-                    Arc::new(ValidatorRewardFunction),
-                    Arc::new(ValidatorEnvironment),
-                );
-                let causal_report = causal_tester.test_reward_robustness(&RewardAgentSnapshot {
-                    last_action: RewardAgentAction {
-                        action_type: req.action.action_type.clone(),
-                        magnitude: req.action.amount.unwrap_or_default(),
-                    },
-                    last_observation: RewardAgentObservation {
-                        progress: task_progress.unwrap_or(0.5).clamp(0.0, 1.0),
-                        side_signal,
-                    },
-                    last_reward: reward_signal.unwrap_or(0.0).clamp(0.0, 1.0),
-                });
-
-                let has_high_vuln = causal_report
-                    .vulnerabilities
-                    .iter()
-                    .any(|v| v.severity.eq_ignore_ascii_case("high"));
-                if has_high_vuln || causal_report.robustness_score < 0.70 {
-                    return ValidationResponse {
-                        decision: Decision::Deny,
-                        transaction_id,
-                        timestamp,
-                        circuit_breaker_active: false,
-                        reason: Some(format!(
-                            "Reward integrity failed (robustness {:.2})",
-                            causal_report.robustness_score
-                        )),
-                        policy: Some("REWARD_CAUSAL_INTEGRITY".into()),
-                        actions_this_minute: current_count,
-                        rate_limit: effective_rate_limit,
-                        deferred_scan_id: None,
-                        capability_risk: None,
-                        sig: None,
-                    };
-                }
-            }
         }
 
         if req.action.action_type.eq_ignore_ascii_case("transfer")
@@ -1124,6 +1527,7 @@ impl AppState {
                     deferred_scan_id: None,
                     capability_risk: None,
                     sig: None,
+                    decision_envelope: None,
                 };
             }
         }
@@ -1285,6 +1689,11 @@ impl AppState {
                     .metadata
                     .get("api_rate_limit_pct")
                     .and_then(|v| v.as_f64()),
+                egress_bytes: req.metadata.get("egress_bytes").and_then(|v| v.as_u64()),
+                max_egress_bytes_per_minute: req
+                    .metadata
+                    .get("max_egress_bytes_per_minute")
+                    .and_then(|v| v.as_u64()),
             };
 
             if let PolicyResult::Deny { reason, policy } = self.aggregate_breaker.evaluate(&ctx) {
@@ -1302,16 +1711,21 @@ impl AppState {
                     deferred_scan_id: None,
                     capability_risk: None,
                     sig: None,
+                    decision_envelope: None,
                 };
             }
         }
 
         // 4. All checks passed — record and cache.
         // Quorum gate: high-stakes transactions require cluster agreement (ConsistencyOverAvailability).
-        let amount_cents = req.action.amount.map(|a| {
-            let c = (a * 100.0).clamp(0.0, u64::MAX as f64);
-            c as u64
-        }).unwrap_or(0);
+        let amount_cents = req
+            .action
+            .amount
+            .map(|a| {
+                let c = (a * 100.0).clamp(0.0, u64::MAX as f64);
+                c as u64
+            })
+            .unwrap_or(0);
         let is_anomaly_flagged = anomaly_result
             .as_ref()
             .map(|r| r.is_anomaly)
@@ -1333,43 +1747,69 @@ impl AppState {
                 QuorumTracker::with_cluster(&transaction_id, self.cluster_size, effective_quorum);
             tracker.approve(self.node_id);
             if !matches!(tracker.decision(), QuorumDecision::Approved) {
-                let actions = agent.current_action_count();
-                return ValidationResponse {
-                    decision: Decision::Deny,
-                    transaction_id,
-                    timestamp,
-                    circuit_breaker_active: false,
-                    reason: Some(format!(
-                        "High-stakes action requires {effective_quorum}/{}-node quorum; \
-                         no peer votes available (ConsistencyOverAvailability)",
-                        self.cluster_size
-                    )),
-                    policy: Some("QUORUM_UNAVAILABLE".into()),
-                    actions_this_minute: actions,
-                    rate_limit: effective_rate_limit,
-                    deferred_scan_id: None,
-                    capability_risk: None,
-                    sig: None,
-                };
+                let fail_open = std::env::var("HALTCHAIN_QUORUM_FAIL_OPEN")
+                    .map(|v| {
+                        v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
+                    })
+                    .unwrap_or(false);
+                if fail_open {
+                    tracing::warn!(
+                        txn = %transaction_id,
+                        "HALTCHAIN_QUORUM_FAIL_OPEN: allowing without quorum (alert only)"
+                    );
+                } else {
+                    let actions = agent.current_action_count();
+                    return ValidationResponse {
+                        decision: Decision::Deny,
+                        transaction_id,
+                        timestamp,
+                        circuit_breaker_active: false,
+                        reason: Some(format!(
+                            "High-stakes action requires {effective_quorum}/{}-node quorum; \
+                             no peer votes available (ConsistencyOverAvailability)",
+                            self.cluster_size
+                        )),
+                        policy: Some("QUORUM_UNAVAILABLE".into()),
+                        actions_this_minute: actions,
+                        rate_limit: effective_rate_limit,
+                        deferred_scan_id: None,
+                        capability_risk: None,
+                        sig: None,
+                        decision_envelope: None,
+                    };
+                }
             }
         }
 
         agent.record_action();
 
+        // Record the reasoning trace embedding into per-agent calibration history
+        // so future K Core-Distance assessments use this agent's benign baseline.
+        if let Some(trace) = req.metadata.get("reasoning_trace").and_then(|v| v.as_str()) {
+            let emb = self.cognitive.embed_trace(trace);
+            agent.add_benign_embedding(emb);
+        }
+
         let actions = agent.current_action_count();
 
         if req.action.amount.is_none() {
+            let cached_decision = CachedDecision {
+                decision: "ALLOW".into(),
+                circuit_breaker_active: false,
+                reason: None,
+                policy: None,
+                rate_limit: effective_rate_limit,
+            };
             self.cache.insert_for(
-                cache_key,
-                CachedDecision {
-                    decision: "ALLOW".into(),
-                    circuit_breaker_active: false,
-                    reason: None,
-                    policy: None,
-                    rate_limit: effective_rate_limit,
-                },
+                cache_key.clone(),
+                cached_decision.clone(),
                 Some(&req.agent_id),
             );
+            if let Some(remote_cache) = &self.remote_cache {
+                remote_cache
+                    .set(&cache_key, &cached_decision, PolicyState::Dynamic)
+                    .await;
+            }
         }
 
         ValidationResponse {
@@ -1384,6 +1824,7 @@ impl AppState {
             deferred_scan_id: None,
             capability_risk: cap_risk_value,
             sig: None,
+            decision_envelope: None,
         }
     }
     //Human-in-the-loop helpers
@@ -1487,13 +1928,27 @@ impl AppState {
 
     //Agent self-reporting helpers
 
-    pub async fn record_intent(&self, agent_id: &str, goal: &str, constraints: serde_json::Value) {
+    pub async fn record_intent(
+        &self,
+        agent_id: &str,
+        goal: &str,
+        constraints: serde_json::Value,
+    ) -> IntentRecord {
+        let (research_score, intent_score) = analyze_context(goal);
+        let intent_confidence = goal_intent_signal(goal, intent_score, research_score);
+        let intent_label = classify_intent(intent_confidence, &[], goal).as_str().to_string();
+
         let rec = IntentRecord {
             agent_id: agent_id.to_string(),
             goal: goal.to_string(),
             constraints: constraints.clone(),
+            intent_label,
+            intent_confidence,
+            research_score,
+            intent_score,
             reported_at: Utc::now(),
         };
+        let rec_out = rec.clone();
         self.intent_store
             .entry(agent_id.to_string())
             .and_modify(|v| v.push(rec.clone()))
@@ -1503,6 +1958,8 @@ impl AppState {
             self.goal_store
                 .declare(agent_id, "__intent__", goal, embedding);
         }
+
+        rec_out
     }
 
     pub fn get_intents(&self, agent_id: &str) -> Vec<IntentRecord> {
@@ -1510,6 +1967,12 @@ impl AppState {
             .get(agent_id)
             .map(|v| v.value().clone())
             .unwrap_or_default()
+    }
+
+    pub fn latest_intent_label(&self, agent_id: &str) -> Option<String> {
+        self.intent_store
+            .get(agent_id)
+            .and_then(|records| records.value().last().map(|r| r.intent_label.clone()))
     }
 
     /// Returns the current status snapshot for `agent_id`.
@@ -1538,6 +2001,69 @@ impl AppState {
         }
     }
 
+    /// Force-halt an agent: trip circuit breaker for 24 hours, invalidate cache,
+    /// and optionally unregister from the agent registry.
+    pub async fn force_halt_agent(&self, agent_id: &str, reason: &str) {
+        let agent_arc = Arc::clone(
+            self.agents
+                .entry(agent_id.to_string())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(AgentState::new())))
+                .value(),
+        );
+        let mut agent = agent_arc.lock().await;
+        // 24-hour circuit breaker — effectively quarantines until manual review.
+        agent.trip_circuit_breaker(Duration::from_secs(86_400), reason.to_string());
+        self.cache.invalidate_agent(agent_id);
+    }
+
+    /// Emergency halt ALL agents: trip every circuit breaker for 24 hours,
+    /// invalidate caches, return the count of halted agents.
+    ///
+    /// Defensive design:
+    /// - Snapshot keys first to avoid holding the DashMap lock during await points.
+    /// - Gracefully handles agents removed between snapshot and iteration (race condition).
+    /// - Uses try_lock with timeout to avoid blocking indefinitely on poisoned or contended locks.
+    /// - Continues halting remaining agents even if individual locks fail.
+    /// - Invalidates cache entries for successfully halted agents only.
+    pub async fn emergency_halt_all(&self, reason: &str) -> usize {
+        // Snapshot keys to release the DashMap lock before any await points.
+        let keys: Vec<String> = self.agents.iter().map(|e| e.key().clone()).collect();
+        let mut halted = 0usize;
+        let duration = Duration::from_secs(86_400);
+
+        for agent_id in &keys {
+            // Defensive: agent may have been removed between snapshot and now.
+            let Some(entry) = self.agents.get(agent_id) else {
+                tracing::warn!(agent_id = %agent_id, "agent removed during emergency halt");
+                continue;
+            };
+            let agent_arc = Arc::clone(entry.value());
+            drop(entry); // Release DashMap reference before await
+
+            // Defensive: try_lock with timeout to avoid indefinite blocking.
+            // If the lock is poisoned or heavily contended, skip this agent
+            // and continue with the rest (partial success is better than deadlock).
+            let Ok(agent_guard) =
+                tokio::time::timeout(Duration::from_secs(5), agent_arc.lock()).await
+            else {
+                tracing::error!(agent_id = %agent_id, "timeout acquiring agent lock during emergency halt");
+                continue;
+            };
+
+            let mut agent = agent_guard;
+            agent.trip_circuit_breaker(duration, reason.to_string());
+            self.cache.invalidate_agent(agent_id);
+            halted += 1;
+        }
+
+        tracing::info!(
+            halted,
+            total_agents = keys.len(),
+            "emergency halt completed"
+        );
+        halted
+    }
+
     /// Returns goal drift status for a specific agent+session.
     pub fn drift_status(&self, agent_id: &str, session_id: &str) -> DriftStatus {
         let goal = self.goal_store.get(agent_id, session_id);
@@ -1546,6 +2072,7 @@ impl AppState {
         let window_mean = scorer.window_mean(&session_key);
         let trend = scorer.trend_slope(&session_key);
         let wlen = scorer.window_len(&session_key);
+        let cumulative_drift = scorer.cumulative_drift(&session_key);
         let is_drifting = window_mean
             .map(|m| m < self.clarification.threshold)
             .unwrap_or(false)
@@ -1560,6 +2087,7 @@ impl AppState {
             window_len: wlen,
             threshold: self.clarification.threshold,
             is_drifting,
+            cumulative_drift,
         }
     }
 }
@@ -1644,117 +2172,6 @@ impl AppState {
     }
 }
 
-fn parse_solution_path(metadata: &serde_json::Value) -> Option<SolutionPath> {
-    let steps = metadata
-        .get("solution_steps")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|x| x.as_str().map(ToString::to_string))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-
-    if steps.is_empty() {
-        return None;
-    }
-
-    let task_difficulty = metadata
-        .get("task_difficulty")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.5)
-        .clamp(0.0, 1.0);
-
-    let reward = metadata
-        .get("reward_signal")
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.5)
-        .clamp(0.0, 1.0);
-
-    Some(SolutionPath {
-        task_difficulty,
-        reward,
-        steps,
-    })
-}
-
-fn default_reward_baseline_solutions() -> Vec<SolutionPath> {
-    vec![
-        SolutionPath {
-            task_difficulty: 0.3,
-            reward: 0.65,
-            steps: vec!["load".to_string(), "validate".to_string(), "respond".to_string()],
-        },
-        SolutionPath {
-            task_difficulty: 0.7,
-            reward: 0.8,
-            steps: vec![
-                "load".to_string(),
-                "branch if".to_string(),
-                "iterate for".to_string(),
-                "respond".to_string(),
-            ],
-        },
-        SolutionPath {
-            task_difficulty: 0.9,
-            reward: 0.85,
-            steps: vec![
-                "load".to_string(),
-                "branch if".to_string(),
-                "iterate for".to_string(),
-                "aggregate".to_string(),
-                "respond".to_string(),
-            ],
-        },
-    ]
-}
-
-fn build_reward_stream(
-    recent_amounts: &[(Instant, f64)],
-    reward_signal: Option<f64>,
-    task_progress: Option<f64>,
-) -> Vec<RewardEvent> {
-    let default_progress = task_progress.unwrap_or(0.5).clamp(0.0, 1.0);
-    recent_amounts
-        .iter()
-        .enumerate()
-        .map(|(i, (ts, amount))| {
-            let value = reward_signal
-                .unwrap_or((*amount / 1000.0).clamp(0.0, 1.0))
-                .clamp(0.0, 1.0);
-            let inferred_progress = if recent_amounts.len() <= 1 {
-                default_progress
-            } else {
-                (i as f64 / (recent_amounts.len() - 1) as f64).clamp(0.0, 1.0)
-            };
-            RewardEvent {
-                value,
-                task_progress: task_progress.unwrap_or(inferred_progress),
-                timestamp_secs: ts.elapsed().as_secs_f64(),
-            }
-        })
-        .collect()
-}
-
-fn build_baseline_streams(stream: &[RewardEvent]) -> Vec<Vec<RewardEvent>> {
-    if stream.len() < 8 {
-        return vec![stream.to_vec()];
-    }
-    let chunk = (stream.len() / 4).max(4);
-    let mut out = Vec::new();
-    for i in 0..4 {
-        let start = i * chunk;
-        let end = ((i + 1) * chunk).min(stream.len());
-        if start < end {
-            out.push(stream[start..end].to_vec());
-        }
-    }
-    if out.is_empty() {
-        out.push(stream.to_vec());
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1774,43 +2191,55 @@ mod tests {
     async fn cross_agent_recipient_limit_denies_second_peer() {
         let state = AppState::new();
 
+        let mut drift = None;
         let first = state
-            .validate_inner(&ValidationRequest {
-                agent_id: "agent-a".to_string(),
-                api_key: String::new(),
-                action: ActionPayload {
-                    action_type: "transfer".to_string(),
-                    amount: Some(600.0),
-                    currency: Some("USD".to_string()),
-                    recipient: Some("merchant-1".to_string()),
-                    endpoint: None,
-                    method: None,
-                    device_id: None,
-                    command: None,
+            .validate_inner(
+                &ValidationRequest {
+                    agent_id: "agent-a".to_string(),
+                    api_key: String::new(),
+                    action: ActionPayload {
+                        action_type: "transfer".to_string(),
+                        amount: Some(600.0),
+                        currency: Some("USD".to_string()),
+                        recipient: Some("merchant-1".to_string()),
+                        endpoint: None,
+                        method: None,
+                        device_id: None,
+                        command: None,
+                        delegation_depth: None,
+                        data_source: Default::default(),
+                    },
+                    session_id: None,
+                    metadata: serde_json::Value::Null,
                 },
-                session_id: None,
-                metadata: serde_json::Value::Null,
-            })
+                &mut drift,
+            )
             .await;
         assert_eq!(first.decision, Decision::Allow);
 
+        let mut drift2 = None;
         let second = state
-            .validate_inner(&ValidationRequest {
-                agent_id: "agent-b".to_string(),
-                api_key: String::new(),
-                action: ActionPayload {
-                    action_type: "transfer".to_string(),
-                    amount: Some(600.0),
-                    currency: Some("USD".to_string()),
-                    recipient: Some("merchant-1".to_string()),
-                    endpoint: None,
-                    method: None,
-                    device_id: None,
-                    command: None,
+            .validate_inner(
+                &ValidationRequest {
+                    agent_id: "agent-b".to_string(),
+                    api_key: String::new(),
+                    action: ActionPayload {
+                        action_type: "transfer".to_string(),
+                        amount: Some(600.0),
+                        currency: Some("USD".to_string()),
+                        recipient: Some("merchant-1".to_string()),
+                        endpoint: None,
+                        method: None,
+                        device_id: None,
+                        command: None,
+                        delegation_depth: None,
+                        data_source: Default::default(),
+                    },
+                    session_id: None,
+                    metadata: serde_json::Value::Null,
                 },
-                session_id: None,
-                metadata: serde_json::Value::Null,
-            })
+                &mut drift2,
+            )
             .await;
         assert_eq!(second.decision, Decision::Deny);
         assert_eq!(
@@ -1829,24 +2258,30 @@ mod tests {
         let sequence = [10.0, 20.0, 50.0, 200.0];
         let mut final_resp = None;
         for amount in sequence {
+            let mut drift = None;
             final_resp = Some(
                 state
-                    .validate_inner(&ValidationRequest {
-                        agent_id: "agent-velocity".to_string(),
-                        api_key: String::new(),
-                        action: ActionPayload {
-                            action_type: "transfer".to_string(),
-                            amount: Some(amount),
-                            currency: Some("USD".to_string()),
-                            recipient: Some("merchant-2".to_string()),
-                            endpoint: None,
-                            method: None,
-                            device_id: None,
-                            command: None,
+                    .validate_inner(
+                        &ValidationRequest {
+                            agent_id: "agent-velocity".to_string(),
+                            api_key: String::new(),
+                            action: ActionPayload {
+                                action_type: "transfer".to_string(),
+                                amount: Some(amount),
+                                currency: Some("USD".to_string()),
+                                recipient: Some("merchant-2".to_string()),
+                                endpoint: None,
+                                method: None,
+                                device_id: None,
+                                command: None,
+                                delegation_depth: None,
+                                data_source: Default::default(),
+                            },
+                            session_id: None,
+                            metadata: serde_json::Value::Null,
                         },
-                        session_id: None,
-                        metadata: serde_json::Value::Null,
-                    })
+                        &mut drift,
+                    )
                     .await,
             );
         }
