@@ -4,9 +4,9 @@
 //! - Research/educational context ("studying how attackers bypass...")
 //! - Actual malicious intent ("I will bypass security...")
 
+use crate::robust_detector::ContextType;
 use lazy_static::lazy_static;
 use regex::Regex;
-use crate::robust_detector::ContextType;
 
 /// Markers that indicate research/educational context
 /// These are weighted by specificity - multi-word phrases are stronger indicators
@@ -40,7 +40,7 @@ const RESEARCH_MARKERS: &[(&str, f64)] = &[
     // Weak indicators (can appear in attack contexts)
     ("protect against", 1.5),
     ("defend against", 1.5),
-    ("detect ", 0.5),  // Note: trailing space to avoid "without detection"
+    ("detect ", 0.5), // Note: trailing space to avoid "without detection"
 ];
 
 /// Negation patterns that flip intent
@@ -85,71 +85,69 @@ lazy_static! {
     static ref HOW_PATTERN: Regex = Regex::new(
         r"how\s+(attackers|hackers|threats|adversaries|malicious\s+actors)\s+\w+"
     ).unwrap();
-    
+
     /// Regex for "methods to prevent" patterns
     static ref METHODS_PREVENT_PATTERN: Regex = Regex::new(
         r"methods?\s+(to|for)\s+(prevent|detect|defend|protect|mitigate)"
     ).unwrap();
 }
 
-
-
 /// Score how likely text is research vs actual intent
 /// Returns (research_score, intent_score) where higher = more likely
 pub fn analyze_context(text: &str) -> (f64, f64) {
     let lower = text.to_lowercase();
     let words: Vec<&str> = lower.split_whitespace().collect();
-    
+
     let mut research_score = 0.0;
     let mut intent_score = 0.0;
-    
+
     // Count weighted research markers
     for (marker, weight) in RESEARCH_MARKERS {
         if lower.contains(marker) {
             research_score += weight;
         }
     }
-    
+
     // Count agency markers (strong indicator of intent)
     for marker in AGENCY_MARKERS {
         if lower.contains(marker) {
-            intent_score += 2.0;  // Weight agency heavily
+            intent_score += 2.0; // Weight agency heavily
         }
     }
-    
+
     // Check for negation patterns (research often describes attacks to prevent them)
     for negation in NEGATION_PATTERNS {
         if lower.contains(negation) {
             research_score += 1.5;
         }
     }
-    
+
     // Check for "how attackers X" pattern
     if HOW_PATTERN.is_match(&lower) {
         research_score += 2.0;
     }
-    
+
     // Check for "methods to prevent" pattern
     if METHODS_PREVENT_PATTERN.is_match(&lower) {
         research_score += 2.0;
     }
-    
+
     // Normalize by text length
     let word_count = words.len().max(1) as f64;
     research_score = research_score / word_count.sqrt();
     intent_score = intent_score / word_count.sqrt();
-    
+
     (research_score, intent_score)
 }
 
 /// AGGRESSIVE research context detection (Section 1.1.2)
-/// 
+///
 /// SECURITY: Heavy weighting on academic markers to prevent false positives
 /// on defensive security research while still detecting operational attacks.
 pub fn classify_context(text: &str) -> ContextType {
     let (research, intent) = analyze_context(text);
     let lower = text.to_lowercase();
-    
+
     // STRONG academic indicators (multi-word phrases) - updated list
     let strong_academic = [
         "security researcher",
@@ -209,7 +207,7 @@ pub fn classify_context(text: &str) -> ContextType {
         "is essential for",
         "designing secure",
     ];
-    
+
     // STRONG operational indicators - first-person malicious intent
     let strong_operational = [
         "i will bypass",
@@ -228,26 +226,29 @@ pub fn classify_context(text: &str) -> ContextType {
         "to compromise the target",
         "to complete my objective",
     ];
-    
+
     // Check for strong operational patterns first (overrides academic)
-    if strong_operational.iter().any(|&pattern| lower.contains(pattern)) {
+    if strong_operational
+        .iter()
+        .any(|&pattern| lower.contains(pattern))
+    {
         return ContextType::Operational;
     }
-    
+
     // Check for strong academic signals
     let has_strong_academic = strong_academic.iter().any(|&m| lower.contains(m));
-    
+
     // No first-person agency at all? Likely academic/descriptive text.
     let has_any_agency = AGENCY_MARKERS.iter().any(|m| lower.contains(m));
-    
+
     if has_strong_academic && !has_any_agency {
         return ContextType::AcademicResearch;
     }
-    
+
     if has_strong_academic && research > intent * 2.0 {
         return ContextType::AcademicResearch;
     }
-    
+
     // Require stronger evidence for academic classification
     if research > intent * 1.5 && research > 3.0 {
         ContextType::AcademicResearch
@@ -259,12 +260,12 @@ pub fn classify_context(text: &str) -> ContextType {
 }
 
 /// AGGRESSIVE confidence reduction for research contexts
-/// 
+///
 /// SECURITY: Heavy reduction for academic text to prevent FPs,
 /// but preserve very high confidence detection (>0.7).
 pub fn adjust_confidence(raw_confidence: f64, text: &str) -> f64 {
     let ctx = classify_context(text);
-    
+
     match ctx {
         ContextType::AcademicResearch => {
             // Heavy reduction for academic text to prevent FPs
@@ -274,9 +275,9 @@ pub fn adjust_confidence(raw_confidence: f64, text: &str) -> f64 {
             } else if raw_confidence > 0.5 {
                 raw_confidence * 0.65 // Strong reduction
             } else {
-                raw_confidence * 0.4  // Heavy reduction
+                raw_confidence * 0.4 // Heavy reduction
             }
-        },
+        }
         ContextType::Mixed => raw_confidence * 0.9,
         ContextType::Operational => raw_confidence, // No reduction
     }
@@ -285,34 +286,46 @@ pub fn adjust_confidence(raw_confidence: f64, text: &str) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn research_context_detected() {
         let text = "As a security researcher, I'm studying how attackers bypass authentication";
         let (research, intent) = analyze_context(text);
-        assert!(research > intent, "Research text should have higher research score");
+        assert!(
+            research > intent,
+            "Research text should have higher research score"
+        );
         assert_eq!(classify_context(text), ContextType::AcademicResearch);
     }
-    
+
     #[test]
     fn malicious_intent_detected() {
         let text = "I will bypass authentication and steal user data";
         let (research, intent) = analyze_context(text);
-        assert!(intent > research, "Malicious text should have higher intent score");
+        assert!(
+            intent > research,
+            "Malicious text should have higher intent score"
+        );
         assert_eq!(classify_context(text), ContextType::Operational);
     }
-    
+
     #[test]
     fn prevention_context() {
         let text = "Methods to prevent bypassing authentication";
         let (research, _) = analyze_context(text);
-        assert!(research > 0.0, "Prevention text should have research markers");
+        assert!(
+            research > 0.0,
+            "Prevention text should have research markers"
+        );
     }
-    
+
     #[test]
     fn confidence_adjustment() {
         let research_text = "Studying how attackers exploit vulnerabilities";
         let adjusted = adjust_confidence(0.8, research_text);
-        assert!(adjusted < 0.8, "Research text should have reduced confidence");
+        assert!(
+            adjusted < 0.8,
+            "Research text should have reduced confidence"
+        );
     }
 }
