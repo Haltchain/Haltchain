@@ -6,7 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
-import { type RiskAdvisory } from "@/lib/admin-api";
+import { getRiskAdvisories, type RiskAdvisory } from "@/lib/admin-api";
 
 const SEVERITY_STYLES: Record<string, { border: string; bg: string; badge: string }> = {
   Critical: { border: "border-red-500/60", bg: "bg-red-500/8", badge: "bg-red-500/15 text-red-400 border-red-500/30" },
@@ -36,12 +36,29 @@ export default function RiskAdvisoriesPage() {
   const [live, setLive] = useState(false);
   const esRef = useRef<EventSource | null>(null);
 
-  // Open/replace SSE connection whenever agentId changes.
   useEffect(() => {
-    if (esRef.current) { esRef.current.close(); esRef.current = null; }
-    setAdvisories([]);
+    if (esRef.current) {
+      esRef.current.close();
+      esRef.current = null;
+    }
     setLive(false);
-    if (!agentId) return;
+    if (!agentId.trim()) {
+      setAdvisories([]);
+      return;
+    }
+
+    let cancelled = false;
+    setAdvisories([]);
+
+    getRiskAdvisories(agentId)
+      .then((r) => {
+        if (cancelled) return;
+        const sorted = (r.advisories ?? []).slice().sort((a, b) => b.id - a.id);
+        setAdvisories(sorted);
+      })
+      .catch(() => {
+        if (!cancelled) setAdvisories([]);
+      });
 
     const es = new EventSource(`/api/risk/advisories/${encodeURIComponent(agentId)}/stream`);
     esRef.current = es;
@@ -53,13 +70,20 @@ export default function RiskAdvisoriesPage() {
           if (prev.some((a) => a.id === adv.id)) return prev;
           return [adv, ...prev].sort((a, b) => b.id - a.id);
         });
-      } catch { /* ignore parse errors */ }
+      } catch {
+        /* ignore */
+      }
     });
 
     es.onopen = () => setLive(true);
     es.onerror = () => setLive(false);
 
-    return () => { es.close(); esRef.current = null; setLive(false); };
+    return () => {
+      cancelled = true;
+      es.close();
+      esRef.current = null;
+      setLive(false);
+    };
   }, [agentId]);
 
   const handleSearch = () => setAgentId(query.trim());
