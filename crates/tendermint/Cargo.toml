@@ -9,6 +9,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 chrono = { workspace = true }
 tracing = { workspace = true }
+ed25519-dalek = { workspace = true }
+base64 = { workspace = true }
 haltchain-validator = { path = "../validator" }
 haltchain-consensus = { path = "../consensus" }
 

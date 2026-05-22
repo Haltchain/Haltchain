@@ -1,13 +1,15 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use base64::{Engine as _, engine::general_purpose};
 use chrono::Utc;
+use ed25519_dalek::SigningKey;
 use haltchain_validator::{AppState, Decision, ValidationRequest, ValidationResponse};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing;
 
-//Genesis Block 
+//Genesis Block
 
 /// A validator entry in the genesis validator set.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,7 +31,16 @@ pub struct GenesisBlock {
 }
 
 impl GenesisBlock {
+    /// Derive an Ed25519 public key from a deterministic seed byte.
+    /// This ensures genesis keys are valid, verifiable, and reproducible.
+    fn testnet_pubkey(seed_byte: u8) -> String {
+        let signing_key = SigningKey::from_bytes(&[seed_byte; 32]);
+        general_purpose::STANDARD.encode(signing_key.verifying_key().as_bytes())
+    }
+
     /// Build a three-validator local testnet genesis, one per simulated cloud region.
+    /// Keys are derived from deterministic seeds (1, 2, 3) so their validity is
+    /// cryptographically guaranteed and the signing keys are known for testing.
     pub fn for_local_testnet(chain_id: &str) -> Self {
         Self {
             chain_id: chain_id.to_string(),
@@ -38,20 +49,19 @@ impl GenesisBlock {
             validators: vec![
                 GenesisValidator {
                     node_id: "node1".to_string(),
-                    // Placeholder public key — replace with real Ed25519 key in production.
-                    pub_key_b64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".to_string(),
+                    pub_key_b64: Self::testnet_pubkey(1),
                     power: 10,
                     region: "us-east-1".to_string(),
                 },
                 GenesisValidator {
                     node_id: "node2".to_string(),
-                    pub_key_b64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAE=".to_string(),
+                    pub_key_b64: Self::testnet_pubkey(2),
                     power: 10,
                     region: "eu-west-1".to_string(),
                 },
                 GenesisValidator {
                     node_id: "node3".to_string(),
-                    pub_key_b64: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAI=".to_string(),
+                    pub_key_b64: Self::testnet_pubkey(3),
                     power: 10,
                     region: "ap-southeast-1".to_string(),
                 },
@@ -633,6 +643,40 @@ mod tests {
         assert_eq!(genesis.validators.len(), 3);
         let regions: std::collections::HashSet<_> =
             genesis.validators.iter().map(|v| &v.region).collect();
-        assert_eq!(regions.len(), 3, "each testnet node must be in a distinct region");
+        assert_eq!(
+            regions.len(),
+            3,
+            "each testnet node must be in a distinct region"
+        );
+        assert!(
+            genesis
+                .validators
+                .iter()
+                .all(|v| !v.pub_key_b64.starts_with("AAAAAAAA")),
+            "genesis validators must have non-placeholder public keys"
+        );
+    }
+
+    #[test]
+    fn genesis_keys_are_valid_ed25519_derived_from_known_seeds() {
+        use ed25519_dalek::{SigningKey, VerifyingKey};
+        let genesis = GenesisBlock::for_local_testnet("haltchain-local");
+        for (i, v) in genesis.validators.iter().enumerate() {
+            let seed_byte = (i + 1) as u8;
+            let expected_key = SigningKey::from_bytes(&[seed_byte; 32]).verifying_key();
+            let decoded = general_purpose::STANDARD
+                .decode(&v.pub_key_b64)
+                .expect("genesis key must be valid base64");
+            assert_eq!(decoded.len(), 32, "Ed25519 pubkey must be 32 bytes");
+            let vk = VerifyingKey::from_bytes(&decoded.try_into().unwrap())
+                .expect("genesis key must be a valid Ed25519 public key");
+            assert_eq!(
+                vk.as_bytes(),
+                expected_key.as_bytes(),
+                "genesis key for {} must match derivation from seed byte {}",
+                v.node_id,
+                seed_byte
+            );
+        }
     }
 }

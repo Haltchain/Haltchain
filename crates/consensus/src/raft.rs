@@ -496,6 +496,8 @@ impl RaftNode {
     }
 
     fn persist_state(&self) {
+        use std::io::Write;
+
         let Some(path) = &self.persistence_path else {
             return;
         };
@@ -510,7 +512,20 @@ impl RaftNode {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(path, data);
+        let mut f = match std::fs::File::create(path) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "raft persist open failed");
+                return;
+            }
+        };
+        if let Err(e) = f.write_all(&data) {
+            tracing::warn!(path = %path.display(), error = %e, "raft persist write failed");
+            return;
+        }
+        if let Err(e) = f.sync_all() {
+            tracing::warn!(path = %path.display(), error = %e, "raft persist fsync failed");
+        }
     }
 
     fn restore_state(&mut self) {

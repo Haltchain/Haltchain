@@ -19,7 +19,7 @@ use haltchain_consensus::partition::{
 use haltchain_consensus::quorum::{QuorumDecision, QuorumRequest, QuorumTracker};
 use haltchain_consensus::raft::RaftRole;
 
-// Helpers 
+// Helpers
 
 fn apply_counter(counter: Arc<AtomicUsize>) -> ApplyFn {
     Box::new(move |entries: Vec<LogEntry>| {
@@ -320,7 +320,7 @@ async fn killswitch_kill_node2_quorum_continues() {
     jh3.abort();
 }
 
-//  Kill-switch 2: 1/3 Byzantine behavior, BFT resistance 
+//  Kill-switch 2: 1/3 Byzantine behavior, BFT resistance
 
 #[tokio::test(flavor = "multi_thread")]
 async fn killswitch_byzantine_one_third_bft_resistance() {
@@ -329,8 +329,16 @@ async fn killswitch_byzantine_one_third_bft_resistance() {
 
     use haltchain_consensus::raft::{RaftMessage, RaftNode, RequestVoteReq};
 
-    let mut node1 = RaftNode::new(1, vec![2, 3], haltchain_consensus::raft::ELECTION_TIMEOUT_MIN);
-    let mut node2 = RaftNode::new(2, vec![1, 3], haltchain_consensus::raft::ELECTION_TIMEOUT_MIN);
+    let mut node1 = RaftNode::new(
+        1,
+        vec![2, 3],
+        haltchain_consensus::raft::ELECTION_TIMEOUT_MIN,
+    );
+    let mut node2 = RaftNode::new(
+        2,
+        vec![1, 3],
+        haltchain_consensus::raft::ELECTION_TIMEOUT_MIN,
+    );
     // node3 is Byzantine: it spams RequestVote with a stale term.
 
     // Bring node1 and node2 to term 2 (already elected, stable).
@@ -368,14 +376,23 @@ async fn killswitch_byzantine_one_third_bft_resistance() {
         false
     });
 
-    assert!(!granted_by_1, "node1 must reject Byzantine stale-term vote request");
-    assert!(!granted_by_2, "node2 must reject Byzantine stale-term vote request");
+    assert!(
+        !granted_by_1,
+        "node1 must reject Byzantine stale-term vote request"
+    );
+    assert!(
+        !granted_by_2,
+        "node2 must reject Byzantine stale-term vote request"
+    );
 
     // The leader (node1) must remain at term 2 — Byzantine node cannot elevate term via stale msg.
-    assert_eq!(node1.current_term, 2, "Byzantine message must not bump leader term");
+    assert_eq!(
+        node1.current_term, 2,
+        "Byzantine message must not bump leader term"
+    );
 }
 
-// Kill-switch 3: <3ms consensus overhead 
+// Kill-switch 3: <3ms consensus overhead
 
 #[test]
 fn killswitch_consensus_overhead_under_3ms() {
@@ -388,11 +405,17 @@ fn killswitch_consensus_overhead_under_3ms() {
     leader.role = RaftRole::Leader;
     leader.peer_state.insert(
         2,
-        haltchain_consensus::raft::PeerState { next_index: 1, match_index: 0 },
+        haltchain_consensus::raft::PeerState {
+            next_index: 1,
+            match_index: 0,
+        },
     );
     leader.peer_state.insert(
         3,
-        haltchain_consensus::raft::PeerState { next_index: 1, match_index: 0 },
+        haltchain_consensus::raft::PeerState {
+            next_index: 1,
+            match_index: 0,
+        },
     );
 
     const ITERATIONS: u32 = 1000;
