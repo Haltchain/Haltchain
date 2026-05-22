@@ -13,8 +13,38 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
 
+fn emit_security_downgrade_cef(reason: &str, hash_dims: usize) {
+    // CEF sig HC010 matches the API siem module's emit_embedding_downgrade
+    let ts = chrono::Utc::now().to_rfc3339();
+    let escaped_reason = reason.replace('\\', "\\\\").replace('=', "\\=").replace('\n', "\\n");
+    let line = format!(
+        "CEF:0|HaltChain|Validator|{}|HC010|Embedding Security Downgrade|6|\
+         rt={ts} act=hash_fallback cs3={hash_dims} cs3Label=hashDims msg={escaped_reason}",
+        env!("CARGO_PKG_VERSION"),
+    );
+    tracing::warn!(
+        cef_line = %line,
+        hash_dims,
+        "SIEM CEF"
+    );
+    tracing::warn!(
+        hash_dims,
+        reason,
+        "SECURITY_DOWNGRADE: ONNX embedding unavailable; detection confidence near-zero"
+    );
+    // Also write to CEF log file if configured
+    if let Ok(path) = std::env::var("HALTCHAIN_SIEM_CEF_LOG_PATH") {
+        if !path.is_empty() {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+                let _ = writeln!(f, "{line}");
+            }
+        }
+    }
+}
+
 // Import ONNX model
-pub use crate::onnx_model::{OnnxError, OnnxModel, DEFAULT_ONNX_DIMS};
+pub use crate::onnx_model::{DEFAULT_ONNX_DIMS, OnnxError, OnnxModel};
 
 #[cfg(feature = "redis-cache")]
 use crate::redis_cache::RedisEmbeddingCache;
@@ -55,11 +85,23 @@ pub trait EmbeddingModel: Send + Sync {
 
 pub const LOCAL_DIMS: usize = DEFAULT_ONNX_DIMS;
 
+/// Hash fallback width: default 1024, clamped to 64..=4096 via `HALTCHAIN_HASH_DIMS`.
+pub fn hash_dims_from_env() -> usize {
+    const DEF: usize = 1024;
+    const MAX: usize = 4096;
+    const MIN: usize = 64;
+    std::env::var("HALTCHAIN_HASH_DIMS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .map(|n| n.clamp(MIN, MAX))
+        .unwrap_or(DEF)
+}
+
 /// Semantic embedding model using ONNX Runtime.
-/// 
-/// Uses all-MiniLM-L6-v2 (22MB, 384-dim) for high-quality semantic embeddings.
+///
+/// Uses Snowflake Arctic Embed 2.0 Large (~350MB Q4_K_M, 1024-dim) for high-quality semantic embeddings.
 /// This is the PRIMARY model for production use against rogue AGI.
-/// 
+///
 /// Internally caches the ONNX model as a singleton to avoid repeated disk loads
 /// when multiple instances are created (e.g., in test helpers).
 pub struct LocalModel {
@@ -78,10 +120,10 @@ static REDIS_SINGLETON: std::sync::OnceLock<Option<Arc<Mutex<RedisEmbeddingCache
 
 impl LocalModel {
     /// Load from cache directory.
-    /// 
+    ///
     /// Uses a process-wide singleton to avoid repeated disk loads when
     /// multiple LocalModel instances are created (common in test helpers).
-    /// 
+    ///
     /// When compiled with `redis-cache`, automatically connects to Redis
     /// for L2 embedding cache (env: `HALTCHAIN_REDIS_URL` or `REDIS_URL`,
     /// defaults to `redis://127.0.0.1:6379`). Gracefully degrades if
@@ -95,7 +137,7 @@ impl LocalModel {
                 redis: Self::get_redis(),
             });
         }
-        
+
         // Slow path: load from disk and cache
         let onnx = Self::load_from_disk()?;
         let shared = Arc::new(Mutex::new(onnx));
@@ -107,7 +149,7 @@ impl LocalModel {
             redis: Self::get_redis(),
         })
     }
-    
+
     fn load_from_disk() -> Result<OnnxModel, EmbedError> {
         let mut cache_dirs: Vec<Option<PathBuf>> = vec![
             // Prefer INT8 quantized models for lower latency
@@ -141,20 +183,18 @@ impl LocalModel {
                 eprintln!("  - {}", d.display());
             }
         }
-        eprintln!("\nDownload with: ./download_model.sh");
+        eprintln!("\nDownload with: ./scripts/download_arctic_onnx.sh");
         eprintln!("Or set HALTCHAIN_MODEL_DIR environment variable.");
 
         Err(EmbedError::Onnx(OnnxError::ModelNotFound(
-            "Could not find ONNX model in any cache directory".to_string()
+            "Could not find ONNX model in any cache directory".to_string(),
         )))
     }
 
     #[cfg(feature = "redis-cache")]
     fn get_redis() -> Option<Arc<Mutex<RedisEmbeddingCache>>> {
         REDIS_SINGLETON
-            .get_or_init(|| {
-                RedisEmbeddingCache::connect().map(|r| Arc::new(Mutex::new(r)))
-            })
+            .get_or_init(|| RedisEmbeddingCache::connect().map(|r| Arc::new(Mutex::new(r))))
             .clone()
     }
 
@@ -170,7 +210,9 @@ impl LocalModel {
 
     /// Download model from HuggingFace if not present.
     pub async fn download(cache_dir: impl AsRef<std::path::Path>) -> Result<PathBuf, EmbedError> {
-        OnnxModel::download(cache_dir).await.map_err(EmbedError::Onnx)
+        OnnxModel::download(cache_dir)
+            .await
+            .map_err(EmbedError::Onnx)
     }
 
     /// Embed a single text (synchronous for convenience).
@@ -227,9 +269,8 @@ impl LocalModel {
                     .filter(|(i, _)| !hit_set.contains(i))
                     .map(|(_, t)| *t)
                     .collect();
-                let miss_indices: Vec<usize> = (0..texts.len())
-                    .filter(|i| !hit_set.contains(i))
-                    .collect();
+                let miss_indices: Vec<usize> =
+                    (0..texts.len()).filter(|i| !hit_set.contains(i)).collect();
 
                 let computed = self.onnx.lock().embed_batch(&miss_texts);
 
@@ -260,6 +301,10 @@ impl LocalModel {
     pub fn similarity(&self, text1: &str, text2: &str) -> f64 {
         self.onnx.lock().similarity(text1, text2)
     }
+
+    pub fn embedding_width(&self) -> usize {
+        self.onnx.lock().dims()
+    }
 }
 
 #[async_trait]
@@ -269,7 +314,7 @@ impl EmbeddingModel for LocalModel {
     }
 
     fn dims(&self) -> usize {
-        LOCAL_DIMS
+        self.embedding_width()
     }
 }
 
@@ -283,7 +328,7 @@ impl Default for LocalModel {
 // ─── Hash model (legacy, non-semantic fallback) ───────────────────────────────
 
 /// Hash-projection model - NOT semantic, used only as emergency fallback.
-/// 
+///
 /// ⚠️ WARNING: This model does NOT understand meaning. It only matches
 /// exact or near-exact keyword overlaps. Do not use for security-critical
 /// applications against sophisticated adversaries.
@@ -413,19 +458,153 @@ pub enum ModelKind {
     Remote(RemoteModel),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EmbeddingTier {
+    Developer,
+    Growth,
+    Enterprise,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmbeddingMode {
+    Local,
+    Hybrid,
+    ApiOnly,
+}
+
+fn embedding_mode_from_env() -> EmbeddingMode {
+    match std::env::var("HALTCHAIN_EMBEDDING_MODE")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "local" | "airgap" | "air_gapped" => EmbeddingMode::Local,
+        "api_only" | "apionly" => EmbeddingMode::ApiOnly,
+        _ => EmbeddingMode::Hybrid,
+    }
+}
+
+fn embedding_tier_from_env() -> EmbeddingTier {
+    match std::env::var("HALTCHAIN_EMBEDDING_TIER")
+        .unwrap_or_default()
+        .to_lowercase()
+        .as_str()
+    {
+        "individual" | "developer" | "dev" => EmbeddingTier::Developer,
+        "enterprise" => EmbeddingTier::Enterprise,
+        // startup | smb | growth | midmarket | unset → ONNX+hash fallback
+        _ => EmbeddingTier::Growth,
+    }
+}
+
+/// Sync path for cognitive / ONNX detector (no blocking remote HTTP here).
+///
+/// * `HALTCHAIN_EMBEDDING_TIER=developer` → hash-only at [`hash_dims_from_env`] (overrides mode for cheap dev).
+/// * `HALTCHAIN_EMBEDDING_MODE`: `local` = ONNX required (panic if missing); `hybrid` = ONNX or hash;
+///   `api_only` = hash sync path; warm L1 via [`crate::hybrid::RemoteHydrator`] + shared [`EmbeddingCache`].
+pub fn select_local_embedding_kind() -> ModelKind {
+    if matches!(embedding_tier_from_env(), EmbeddingTier::Developer) {
+        let d = hash_dims_from_env();
+        tracing::info!(
+            tier = "developer",
+            dims = d,
+            "embedding: hash-only (no ONNX). OK for dev; not for adversarial semantic evasion."
+        );
+        return ModelKind::Hash(HashModel::new(d));
+    }
+    match embedding_mode_from_env() {
+        EmbeddingMode::Local => ModelKind::local_required(),
+        EmbeddingMode::Hybrid => ModelKind::local_or_hash(),
+        EmbeddingMode::ApiOnly => {
+            let d = hash_dims_from_env();
+            tracing::info!(
+                mode = "api_only",
+                dims = d,
+                "embedding: sync hash; hydrate cache async (RemoteHydrator), align EMBEDDING_DIMS with hash width"
+            );
+            ModelKind::Hash(HashModel::new(d))
+        }
+    }
+}
+
 impl ModelKind {
     pub fn local() -> Result<Self, EmbedError> {
         Ok(Self::Local(LocalModel::new()?))
     }
 
-    /// Fallback to hash model if ONNX unavailable.
-    pub fn local_or_hash() -> Self {
+    /// Air-gapped / strict local: ONNX only. Panics if the model cannot be loaded.
+    pub fn local_required() -> Self {
         match LocalModel::new() {
-            Ok(m) => Self::Local(m),
-            Err(_) => {
-                eprintln!("Warning: ONNX model not available, falling back to hash-projection. \
-                          Download model for semantic security.");
-                Self::Hash(HashModel::default())
+            Ok(m) => {
+                tracing::info!(
+                    dims = m.embedding_width(),
+                    "ONNX semantic model loaded (local mode)"
+                );
+                Self::Local(m)
+            }
+            Err(e) => panic!(
+                "HALTCHAIN_EMBEDDING_MODE=local requires ONNX. Set HALTCHAIN_MODEL_DIR or run download script. Error: {e}"
+            ),
+        }
+    }
+
+    /// Fallback to hash model if ONNX unavailable.
+    ///
+    /// In production (`HALTCHAIN_ENV=production`), this will **panic** instead
+    /// of silently degrading to the non-semantic hash model.  The hash model
+    /// cannot perform real semantic similarity and will produce near-zero
+    /// confidence on even obvious malicious text.
+    ///
+    /// Use [`ModelKind::standalone_or_hash`] for the standalone `--profile`
+    /// mode, which must never panic even in production environments.
+    pub fn local_or_hash() -> Self {
+        let hd = hash_dims_from_env();
+        match LocalModel::new() {
+            Ok(m) => {
+                tracing::info!(dims = m.embedding_width(), "ONNX semantic model loaded");
+                Self::Local(m)
+            }
+            Err(e) => {
+                let env = std::env::var("HALTCHAIN_ENV").unwrap_or_default();
+                if env.eq_ignore_ascii_case("production") {
+                    panic!(
+                        "FATAL: ONNX model not available in production mode. \
+                         Hash fallback is NOT safe for security-critical use. \
+                         Run ./Documents/download_model.sh or set HALTCHAIN_MODEL_DIR. \
+                         Error: {e}"
+                    );
+                }
+                // Emit CEF security-downgrade event so SIEM consumers can alert on this.
+                let reason = format!("ONNX model unavailable: {e}");
+                emit_security_downgrade_cef(&reason, hd);
+                Self::Hash(HashModel::new(hd))
+            }
+        }
+    }
+
+    /// Standalone-safe variant: always falls back to the hash model without
+    /// panicking, regardless of `HALTCHAIN_ENV`.  Used by `--profile standalone`
+    /// which is designed for zero-external-dependency deployments.
+    ///
+    /// The semantic ONNX model is attempted first for best quality, but the
+    /// hash fallback is explicitly sanctioned for this profile.
+    pub fn standalone_or_hash() -> Self {
+        let hd = hash_dims_from_env();
+        match LocalModel::new() {
+            Ok(m) => {
+                tracing::info!(
+                    "standalone: ONNX semantic model loaded ({}d)",
+                    m.embedding_width()
+                );
+                Self::Local(m)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    dims = hd,
+                    "standalone: ONNX unavailable, using hash-projection embeddings (non-semantic)"
+                );
+                Self::Hash(HashModel::new(hd))
             }
         }
     }
@@ -450,9 +629,27 @@ impl ModelKind {
             ModelKind::Local(m) => m.embed_text(text),
             ModelKind::Hash(m) => m.embed_text(text),
             ModelKind::Remote(m) => {
-                tracing::error!("embed_text is synchronous and cannot be used with RemoteModel; returning zero vector");
+                tracing::error!(
+                    "embed_text is synchronous and cannot be used with RemoteModel; returning zero vector"
+                );
                 vec![0.0; m.dims()]
             }
+        }
+    }
+
+    /// Returns `true` when backed by a real semantic model (ONNX or Remote).
+    /// Hash-projection is NOT semantic — it only matches keyword overlaps.
+    pub fn is_semantic(&self) -> bool {
+        matches!(self, ModelKind::Local(_) | ModelKind::Remote(_))
+    }
+
+    /// Human-readable label (default ONNX = Snowflake Arctic Embed L v2.0; override with HALTCHAIN_MODEL_LABEL).
+    pub fn model_name(&self) -> String {
+        match self {
+            ModelKind::Local(_) => std::env::var("HALTCHAIN_MODEL_LABEL")
+                .unwrap_or_else(|_| "onnx/snowflake-arctic-embed-l-v2.0".to_string()),
+            ModelKind::Hash(_) => format!("hash-projection:{}d (non-semantic)", self.dims()),
+            ModelKind::Remote(_) => "remote/openai-compatible".to_string(),
         }
     }
 }
@@ -606,6 +803,9 @@ pub async fn verify_model_checksum(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    static ENV_TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[tokio::test]
     async fn hash_model_same_text_stable() {
@@ -640,5 +840,47 @@ mod tests {
             sim_s > sim_d,
             "similar sim {sim_s:.4} should exceed unrelated {sim_d:.4}"
         );
+    }
+
+    #[test]
+    fn hash_fallback_width_follows_hash_dims_env() {
+        let d = hash_dims_from_env();
+        let m = HashModel::new(d);
+        assert_eq!(m.embed_text("x").len(), d);
+    }
+
+    #[test]
+    fn hash_dims_env_clamped() {
+        let _g = ENV_TEST_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        unsafe {
+            std::env::set_var("HALTCHAIN_HASH_DIMS", "999999");
+            assert_eq!(hash_dims_from_env(), 4096);
+            std::env::set_var("HALTCHAIN_HASH_DIMS", "10");
+            assert_eq!(hash_dims_from_env(), 64);
+            std::env::remove_var("HALTCHAIN_HASH_DIMS");
+        }
+    }
+
+    #[test]
+    fn tier_developer_select_is_full_dim_hash() {
+        let _g = ENV_TEST_MUTEX
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap();
+        // Rust 2024: env mutation is unsafe (no concurrent readers in this test process).
+        unsafe {
+            std::env::remove_var("HALTCHAIN_EMBEDDING_TIER");
+            std::env::remove_var("HALTCHAIN_HASH_DIMS");
+            std::env::set_var("HALTCHAIN_EMBEDDING_TIER", "developer");
+        }
+        let k = select_local_embedding_kind();
+        unsafe {
+            std::env::remove_var("HALTCHAIN_EMBEDDING_TIER");
+        }
+        assert!(matches!(k, ModelKind::Hash(_)));
+        assert_eq!(k.dims(), hash_dims_from_env());
     }
 }

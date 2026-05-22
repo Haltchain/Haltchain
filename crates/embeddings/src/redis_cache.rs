@@ -23,8 +23,8 @@ const KEY_PREFIX: &str = "haltchain:emb:v1";
 /// the same model, but TTL prevents unbounded growth on Redis.
 const TTL_SECS: u64 = 86_400;
 
-/// Embedding dimension for all-MiniLM-L6-v2.
-const EMBED_DIMS: usize = 384;
+/// Embedding dimension for Snowflake Arctic Embed 2.0 Large.
+const EMBED_DIMS: usize = 1024;
 
 pub struct RedisEmbeddingCache {
     conn: Connection,
@@ -78,16 +78,14 @@ impl RedisEmbeddingCache {
             .collect();
 
         // MGET returns Vec<Option<Vec<u8>>>
-        let results: Vec<Option<Vec<u8>>> = match redis::cmd("MGET")
-            .arg(&keys)
-            .query(&mut self.conn)
-        {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("Redis embedding cache MGET failed: {e}");
-                return Vec::new();
-            }
-        };
+        let results: Vec<Option<Vec<u8>>> =
+            match redis::cmd("MGET").arg(&keys).query(&mut self.conn) {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!("Redis embedding cache MGET failed: {e}");
+                    return Vec::new();
+                }
+            };
 
         results
             .into_iter()
@@ -121,7 +119,7 @@ impl RedisEmbeddingCache {
     }
 }
 
-/// Serialize embedding as raw little-endian f64 bytes (384 × 8 = 3072 bytes).
+/// Serialize embedding as raw little-endian f64 bytes (1024 × 8 = 8192 bytes).
 /// Compact and zero-copy on decode.
 fn serialize_embedding(embedding: &[f64]) -> Vec<u8> {
     let mut buf = Vec::with_capacity(embedding.len() * 8);

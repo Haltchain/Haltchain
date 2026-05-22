@@ -1,21 +1,23 @@
 //! ONNX-based semantic embedding model.
 //!
-//! Uses pre-trained transformer models (e.g., all-MiniLM-L6-v2) for
-//! high-quality semantic embeddings. Replaces the hash-projection
-//! LocalModel with real neural network-based embeddings.
+//! Uses Snowflake Arctic Embed 2.0 Large for high-quality semantic embeddings.
+//! Replaces the hash-projection LocalModel with real neural network-based embeddings.
 //!
-//! Model: all-MiniLM-L6-v2 (22MB, 384-dim, fast inference)
+//! Model: Snowflake Arctic Embed 2.0 Large (~350MB Q4_K_M, 1024-dim, state-of-the-art retrieval)
 //! - Mean pooling over token embeddings
 //! - L2 normalized output
 //! - Semantic similarity correlates with human judgment
+//! - Supports up to 8192 tokens (vs 256 for MiniLM)
 
-use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use ndarray::{Array1, Array2, IxDyn};
 use ort::session::Session;
 use ort::session::builder::{GraphOptimizationLevel, SessionBuilder};
 use ort::value::Value;
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokenizers::{PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
@@ -23,18 +25,19 @@ use tokenizers::{PaddingDirection, PaddingParams, PaddingStrategy, Tokenizer, Tr
 use crate::model::cosine_similarity;
 
 // Re-export ep module for execution provider configuration
-#[cfg(feature = "coreml")]
-use ort::ep::CoreML;
 #[cfg(feature = "cuda")]
 use ort::ep::CUDA;
+#[cfg(feature = "coreml")]
+use ort::ep::CoreML;
 #[cfg(feature = "tensorrt")]
 use ort::ep::TensorRT;
 
-/// Default model dimension for all-MiniLM-L6-v2.
-pub const DEFAULT_ONNX_DIMS: usize = 384;
+/// Default model dimension for Snowflake Arctic Embed 2.0 Large.
+pub const DEFAULT_ONNX_DIMS: usize = 1024;
 
 /// Model files needed for ONNX inference.
-const MODEL_URL_BASE: &str = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main";
+const MODEL_URL_BASE: &str =
+    "https://huggingface.co/Snowflake/snowflake-arctic-embed-l-v2.0/resolve/main";
 const ONNX_FILENAME: &str = "onnx/model.onnx";
 const TOKENIZER_FILENAME: &str = "tokenizer.json";
 
@@ -57,12 +60,51 @@ pub struct OnnxModel {
     cache_order: std::collections::VecDeque<u64>,
 }
 
+/// Compute SHA-256 of a file and return it as a lowercase hex string.
+fn sha256_of_file(path: &Path) -> Result<String, OnnxError> {
+    let mut file = std::fs::File::open(path)
+        .map_err(|e| OnnxError::ChecksumIo(format!("{}: {e}", path.display())))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = file
+            .read(&mut buf)
+            .map_err(|e| OnnxError::ChecksumIo(format!("{}: {e}", path.display())))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Verify a file's SHA-256 against an expected hex digest.
+/// Env vars: HALTCHAIN_MODEL_ONNX_SHA256 (model), HALTCHAIN_MODEL_TOKENIZER_SHA256 (tokenizer).
+/// Returns Ok(()) if env var not set (opt-in) or digest matches.
+/// Returns Err(ChecksumMismatch) if env var is set and digest differs (fail-closed).
+fn verify_checksum(path: &Path, env_var: &str) -> Result<(), OnnxError> {
+    let expected = match std::env::var(env_var) {
+        Ok(v) if !v.trim().is_empty() => v.trim().to_lowercase(),
+        _ => return Ok(()),
+    };
+    let actual = sha256_of_file(path)?;
+    if actual != expected {
+        return Err(OnnxError::ChecksumMismatch {
+            file: path.display().to_string(),
+            expected,
+            actual,
+        });
+    }
+    tracing::debug!(file = %path.display(), "model file integrity check passed");
+    Ok(())
+}
+
 impl OnnxModel {
     /// Load model from directory containing model.onnx and tokenizer.json.
-    /// 
+    ///
     /// # Arguments
     /// * `model_dir` - Directory containing `model.onnx` and `tokenizer.json`
-    /// 
+    ///
     /// # Errors
     /// Returns error if model files not found or invalid.
     pub fn from_dir(model_dir: impl AsRef<Path>) -> Result<Self, OnnxError> {
@@ -82,7 +124,9 @@ impl OnnxModel {
             return Err(OnnxError::ModelNotFound(model_path.display().to_string()));
         }
         if !tokenizer_path.exists() {
-            return Err(OnnxError::TokenizerNotFound(tokenizer_path.display().to_string()));
+            return Err(OnnxError::TokenizerNotFound(
+                tokenizer_path.display().to_string(),
+            ));
         }
 
         Self::load(&model_path, &tokenizer_path)
@@ -98,6 +142,10 @@ impl OnnxModel {
         let num_threads = std::thread::available_parallelism()
             .map(|n| n.get().min(8))
             .unwrap_or(4);
+
+        // Integrity verification (fail-closed when env vars are set).
+        verify_checksum(model_path, "HALTCHAIN_MODEL_ONNX_SHA256")?;
+        verify_checksum(tokenizer_path, "HALTCHAIN_MODEL_TOKENIZER_SHA256")?;
 
         let mut builder = SessionBuilder::new()
             .map_err(|e| OnnxError::SessionBuild(e.to_string()))?
@@ -121,7 +169,8 @@ impl OnnxModel {
         eps.push(CoreML::default().build());
 
         if !eps.is_empty() {
-            builder = builder.with_execution_providers(eps)
+            builder = builder
+                .with_execution_providers(eps)
                 .map_err(|e| OnnxError::SessionBuild(e.to_string()))?;
         }
 
@@ -149,11 +198,14 @@ impl OnnxModel {
             pad_to_multiple_of: None,
         }));
 
-        let max_length = 256;
-        tokenizer.with_truncation(Some(TruncationParams {
-            max_length,
-            ..Default::default()
-        })).map_err(|e| OnnxError::TokenizerLoad(e.to_string()))?;
+        // Snowflake Arctic Embed 2.0 supports up to 8192 tokens
+        let max_length = 8192;
+        tokenizer
+            .with_truncation(Some(TruncationParams {
+                max_length,
+                ..Default::default()
+            }))
+            .map_err(|e| OnnxError::TokenizerLoad(e.to_string()))?;
 
         Ok(Self {
             session: Arc::new(Mutex::new(session)),
@@ -166,10 +218,10 @@ impl OnnxModel {
     }
 
     /// Download model files from HuggingFace if not present.
-    /// 
+    ///
     /// # Arguments
     /// * `cache_dir` - Directory to cache downloaded files
-    /// 
+    ///
     /// # Errors
     /// Returns error if download fails.
     #[allow(unused)]
@@ -228,18 +280,19 @@ impl OnnxModel {
     /// Cache is bounded to [`EMBED_CACHE_CAPACITY`] entries with LRU eviction.
     pub fn embed_text(&mut self, text: &str) -> Vec<f64> {
         let key = Self::hash_text(text);
-        
+
         // Cache hit — return clone
         if let Some(cached) = self.cache.get(&key) {
             return cached.clone();
         }
-        
+
         // Cache miss — compute embedding
-        let embedding = self.embed_batch_uncached(&[text])
+        let embedding = self
+            .embed_batch_uncached(&[text])
             .into_iter()
             .next()
             .unwrap_or_default();
-        
+
         // Insert into cache with LRU eviction
         if self.cache_order.len() >= EMBED_CACHE_CAPACITY {
             if let Some(old_key) = self.cache_order.pop_front() {
@@ -248,10 +301,10 @@ impl OnnxModel {
         }
         self.cache.insert(key, embedding.clone());
         self.cache_order.push_back(key);
-        
+
         embedding
     }
-    
+
     pub fn hash_text(text: &str) -> u64 {
         let mut hasher = std::hash::DefaultHasher::new();
         text.hash(&mut hasher);
@@ -264,11 +317,11 @@ impl OnnxModel {
         if texts.is_empty() {
             return Vec::new();
         }
-        
+
         let mut results = vec![None; texts.len()];
         let mut miss_indices = Vec::new();
         let mut miss_texts = Vec::new();
-        
+
         for (i, text) in texts.iter().enumerate() {
             let key = Self::hash_text(text);
             if let Some(cached) = self.cache.get(&key) {
@@ -278,7 +331,7 @@ impl OnnxModel {
                 miss_texts.push(*text);
             }
         }
-        
+
         // Run inference only on cache misses
         if !miss_texts.is_empty() {
             let miss_refs: Vec<&str> = miss_texts.iter().map(|s| *s).collect();
@@ -297,11 +350,18 @@ impl OnnxModel {
                 results[idx] = Some(embedding);
             }
         }
-        
-        results.into_iter().map(|r| r.unwrap_or_else(|| {
-            tracing::warn!("embedding cache miss produced no result; returning zero vector");
-            vec![0.0; self.dims]
-        })).collect()
+
+        results
+            .into_iter()
+            .map(|r| {
+                r.unwrap_or_else(|| {
+                    tracing::warn!(
+                        "embedding cache miss produced no result; returning zero vector"
+                    );
+                    vec![0.0; self.dims]
+                })
+            })
+            .collect()
     }
 
     /// Raw ONNX inference without cache. Used internally.
@@ -361,34 +421,46 @@ impl OnnxModel {
 
         // Run inference
         let mut session = self.session.lock();
-        
+
         // Create input values - from_array takes the ndarray directly
         let input_ids_value = match ndarray::Array::from_shape_vec(
-                IxDyn(&[batch_size, seq_length]),
-                input_ids.iter().cloned().collect()
-            ).and_then(|a| Value::from_array(a).map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported).into())) {
+            IxDyn(&[batch_size, seq_length]),
+            input_ids.iter().cloned().collect(),
+        )
+        .and_then(|a| {
+            Value::from_array(a)
+                .map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported).into())
+        }) {
             Ok(v) => v,
             Err(_) => {
                 tracing::error!("failed to create input_ids tensor");
                 return texts.iter().map(|_| vec![0.0; self.dims]).collect();
             }
         };
-        
+
         let attention_mask_value = match ndarray::Array::from_shape_vec(
-                IxDyn(&[batch_size, seq_length]),
-                attention_mask.iter().cloned().collect()
-            ).and_then(|a| Value::from_array(a).map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported).into())) {
+            IxDyn(&[batch_size, seq_length]),
+            attention_mask.iter().cloned().collect(),
+        )
+        .and_then(|a| {
+            Value::from_array(a)
+                .map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported).into())
+        }) {
             Ok(v) => v,
             Err(_) => {
                 tracing::error!("failed to create attention_mask tensor");
                 return texts.iter().map(|_| vec![0.0; self.dims]).collect();
             }
         };
-        
+
         let token_type_ids_value = match ndarray::Array::from_shape_vec(
-                IxDyn(&[batch_size, seq_length]),
-                token_type_ids.iter().cloned().collect()
-            ).and_then(|a| Value::from_array(a).map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported).into())) {
+            IxDyn(&[batch_size, seq_length]),
+            token_type_ids.iter().cloned().collect(),
+        )
+        .and_then(|a| {
+            Value::from_array(a)
+                .map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported).into())
+        }) {
             Ok(v) => v,
             Err(_) => {
                 tracing::error!("failed to create token_type_ids tensor");
@@ -435,16 +507,16 @@ impl OnnxModel {
                 return texts.iter().map(|_| vec![0.0; self.dims]).collect();
             }
         };
-        
+
         // Convert to ndarray for processing
         let shape_vec: Vec<usize> = shape.iter().map(|&x| x as usize).collect();
         let batch = shape_vec[0];
         let seq_len = shape_vec[1];
         let hidden = shape_vec[2];
-        
+
         let token_embeddings = match Array2::from_shape_vec(
             (batch * seq_len, hidden),
-            output_data.iter().cloned().collect()
+            output_data.iter().cloned().collect(),
         ) {
             Ok(t) => t,
             Err(_) => {
@@ -458,7 +530,7 @@ impl OnnxModel {
         for b in 0..batch_size {
             let mask = attention_mask.slice(ndarray::s![b, ..]);
             let start_idx = b * seq_len;
-            
+
             // Compute mean of non-padding tokens
             let mut sum = Array1::<f32>::zeros(self.dims);
             let mut count = 0i64;
@@ -466,7 +538,11 @@ impl OnnxModel {
             for (t, &m) in mask.iter().enumerate() {
                 if m > 0 {
                     let idx = start_idx + t;
-                    for (i, val) in token_embeddings.slice(ndarray::s![idx, ..]).iter().enumerate() {
+                    for (i, val) in token_embeddings
+                        .slice(ndarray::s![idx, ..])
+                        .iter()
+                        .enumerate()
+                    {
                         sum[i] += val;
                     }
                     count += 1;
@@ -490,7 +566,7 @@ impl OnnxModel {
 
         embeddings
     }
-    
+
     /// Get maximum tokenization length
     pub fn max_length(&self) -> usize {
         self.max_length
@@ -523,6 +599,14 @@ pub enum OnnxError {
     TokenizerLoad(String),
     #[error("download failed: {0}")]
     Download(String),
+    #[error("model integrity check failed for {file}: expected {expected}, got {actual}")]
+    ChecksumMismatch {
+        file: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("failed to read file for checksum verification: {0}")]
+    ChecksumIo(String),
 }
 
 #[cfg(test)]

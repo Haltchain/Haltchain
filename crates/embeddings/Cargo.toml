@@ -26,6 +26,10 @@ dirs = "5"
 # Optional Redis L2 embedding cache (shared across instances)
 redis = { version = "0.28", optional = true }
 
+[[bin]]
+name = "haltchain-model-worker"
+path = "src/bin/model_worker_main.rs"
+
 [features]
 default = []
 coreml = ["ort/coreml"]
