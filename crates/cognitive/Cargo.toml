@@ -13,6 +13,10 @@ lazy_static = "1"
 ndarray = "0.15"
 async-trait = "0.1"
 aho-corasick = "1"
+decancer = "3.3.3"
+reqwest = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 rand = "0.8"
