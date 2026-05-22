@@ -21,10 +21,10 @@ impl RiskLevel {
     /// Default sampling rate for each risk level
     pub fn default_rate(&self) -> f64 {
         match self {
-            RiskLevel::Critical => 1.0,  // 100%
-            RiskLevel::High => 0.5,      // 50%
-            RiskLevel::Medium => 0.1,    // 10%
-            RiskLevel::Low => 0.01,      // 1%
+            RiskLevel::Critical => 1.0, // 100%
+            RiskLevel::High => 0.5,     // 50%
+            RiskLevel::Medium => 0.1,   // 10%
+            RiskLevel::Low => 0.01,     // 1%
         }
     }
 }
@@ -96,7 +96,12 @@ impl StratifiedSampler {
     /// Create new sampler with default strata
     pub fn new() -> Self {
         let mut strata = HashMap::new();
-        for level in [RiskLevel::Critical, RiskLevel::High, RiskLevel::Medium, RiskLevel::Low] {
+        for level in [
+            RiskLevel::Critical,
+            RiskLevel::High,
+            RiskLevel::Medium,
+            RiskLevel::Low,
+        ] {
             strata.insert(level, SamplingStratum::new(level));
         }
 
@@ -127,16 +132,17 @@ impl StratifiedSampler {
     }
 
     /// Decide whether to sample an interaction (Section 8.1.1)
-    /// 
+    ///
     /// Returns true if this interaction should be sampled
     pub fn should_sample(&mut self, interaction: &Interaction) -> bool {
         let stratum = self.classify(interaction);
-        
-        let rate = self.strata
+
+        let rate = self
+            .strata
             .get(&stratum)
             .map(|s| s.sampling_rate)
             .unwrap_or_else(|| stratum.default_rate());
-        
+
         self.rng.r#gen::<f64>() < rate
     }
 
@@ -148,7 +154,7 @@ impl StratifiedSampler {
     }
 
     /// Multi-armed bandit optimization (Section 8.1.1)
-    /// 
+    ///
     /// Adjusts sampling rates based on observed anomaly rates.
     /// Increases sampling where anomalies are found.
     pub fn optimize_sampling_rates(&mut self, min_rate: f64, max_rate: f64) {
@@ -156,7 +162,7 @@ impl StratifiedSampler {
         let safe_min = if min_rate.is_finite() { min_rate } else { 0.0 };
         for stratum in self.strata.values_mut() {
             let anomaly_rate = stratum.anomaly_rate();
-            
+
             // Increase sampling where anomalies are found (>5% threshold)
             if anomaly_rate > 0.05 {
                 stratum.sampling_rate = (stratum.sampling_rate * 2.0).min(safe_max);
@@ -164,7 +170,7 @@ impl StratifiedSampler {
                 // Decrease sampling where few anomalies found
                 stratum.sampling_rate = (stratum.sampling_rate * 0.8).max(safe_min);
             }
-            
+
             // Ensure within bounds
             stratum.sampling_rate = stratum.sampling_rate.clamp(safe_min, safe_max);
         }
@@ -175,7 +181,12 @@ impl StratifiedSampler {
         self.strata
             .iter()
             .map(|(level, stratum)| {
-                (*level, stratum.sampling_rate, stratum.sample_count, stratum.anomaly_count)
+                (
+                    *level,
+                    stratum.sampling_rate,
+                    stratum.sample_count,
+                    stratum.anomaly_count,
+                )
             })
             .collect()
     }
@@ -237,7 +248,7 @@ impl EpsilonGreedyBandit {
     /// Create new bandit with epsilon exploration rate
     pub fn new(epsilon: f64, arm_ids: Vec<String>) -> Self {
         let arms = arm_ids.into_iter().map(BanditArm::new).collect();
-        
+
         Self {
             arms,
             epsilon: epsilon.clamp(0.0, 1.0),
@@ -248,7 +259,7 @@ impl EpsilonGreedyBandit {
     /// Select arm to pull
     pub fn select(&mut self) -> usize {
         let mut rng = rand::thread_rng();
-        
+
         // Epsilon: explore randomly
         if rng.r#gen::<f64>() < self.epsilon {
             rng.gen_range(0..self.arms.len())
@@ -262,7 +273,7 @@ impl EpsilonGreedyBandit {
     fn best_arm(&self) -> usize {
         let mut best_idx = 0;
         let mut best_reward = 0.0;
-        
+
         for (i, arm) in self.arms.iter().enumerate() {
             let reward = arm.average_reward();
             if reward > best_reward || (reward == best_reward && arm.pulls == 0) {
@@ -270,7 +281,7 @@ impl EpsilonGreedyBandit {
                 best_idx = i;
             }
         }
-        
+
         best_idx
     }
 
@@ -291,13 +302,17 @@ impl EpsilonGreedyBandit {
     }
 }
 
-/// Thompson Sampling bandit (Bayesian approach)
+/// Thompson Sampling bandit (Bayesian approach).
+/// Only available when compiled with the `experimental` feature.
+#[cfg(feature = "experimental")]
 #[derive(Debug, Clone)]
 pub struct ThompsonSamplingBandit {
     arms: Vec<ThompsonArm>,
 }
 
-/// Thompson sampling arm using Beta distribution
+/// Thompson sampling arm using Beta distribution.
+/// Only available when compiled with the `experimental` feature.
+#[cfg(feature = "experimental")]
 #[derive(Debug, Clone)]
 pub struct ThompsonArm {
     pub id: String,
@@ -305,6 +320,7 @@ pub struct ThompsonArm {
     pub beta: f64,  // Failures + 1
 }
 
+#[cfg(feature = "experimental")]
 impl ThompsonArm {
     pub fn new(id: String) -> Self {
         Self {
@@ -331,9 +347,9 @@ impl ThompsonArm {
         // Simplified Beta sampling using approximation
         // For proper implementation, use statrs crate
         let mean = self.expected_value();
-        let variance = (self.alpha * self.beta) 
+        let variance = (self.alpha * self.beta)
             / ((self.alpha + self.beta).powi(2) * (self.alpha + self.beta + 1.0));
-        
+
         // Simplified: use uniform with variance-based scaling
         let std = variance.sqrt();
         let uniform: f64 = rng.r#gen();
@@ -342,6 +358,7 @@ impl ThompsonArm {
     }
 }
 
+#[cfg(feature = "experimental")]
 impl ThompsonSamplingBandit {
     pub fn new(arm_ids: Vec<String>) -> Self {
         let arms = arm_ids.into_iter().map(ThompsonArm::new).collect();
@@ -350,10 +367,10 @@ impl ThompsonSamplingBandit {
 
     pub fn select(&mut self) -> usize {
         let mut rng = rand::thread_rng();
-        
+
         let mut best_idx = 0;
         let mut best_sample = 0.0;
-        
+
         for (i, arm) in self.arms.iter().enumerate() {
             let sample = arm.sample(&mut rng);
             if sample > best_sample {
@@ -361,7 +378,7 @@ impl ThompsonSamplingBandit {
                 best_idx = i;
             }
         }
-        
+
         best_idx
     }
 
@@ -379,14 +396,14 @@ mod tests {
     #[test]
     fn test_stratified_sampler_critical() {
         let mut sampler = StratifiedSampler::new();
-        
+
         let interaction = Interaction {
             id: "test-001".to_string(),
             risk_level: RiskLevel::Critical,
             timestamp: 1000,
             metadata: HashMap::new(),
         };
-        
+
         // Critical should always be sampled
         assert!(sampler.should_sample(&interaction));
     }
@@ -394,14 +411,14 @@ mod tests {
     #[test]
     fn test_stratified_sampler_low() {
         let mut sampler = StratifiedSampler::new();
-        
+
         let interaction = Interaction {
             id: "test-002".to_string(),
             risk_level: RiskLevel::Low,
             timestamp: 1000,
             metadata: HashMap::new(),
         };
-        
+
         // Low is sampled at 1% - test many times
         let mut sampled = 0;
         for _ in 0..1000 {
@@ -409,7 +426,7 @@ mod tests {
                 sampled += 1;
             }
         }
-        
+
         // Should be around 10 (1% of 1000)
         println!("Low risk sampled: {}/1000", sampled);
         assert!(sampled >= 1 && sampled <= 50); // Wide tolerance for randomness
@@ -418,19 +435,27 @@ mod tests {
     #[test]
     fn test_sampling_optimization() {
         let mut sampler = StratifiedSampler::new();
-        
+
         // Record many anomalies in Medium stratum
         for _ in 0..100 {
             sampler.record_outcome(RiskLevel::Medium, true);
         }
-        
-        let before = sampler.strata.get(&RiskLevel::Medium).unwrap().sampling_rate;
-        
+
+        let before = sampler
+            .strata
+            .get(&RiskLevel::Medium)
+            .unwrap()
+            .sampling_rate;
+
         // Optimize
         sampler.optimize_sampling_rates(0.01, 1.0);
-        
-        let after = sampler.strata.get(&RiskLevel::Medium).unwrap().sampling_rate;
-        
+
+        let after = sampler
+            .strata
+            .get(&RiskLevel::Medium)
+            .unwrap()
+            .sampling_rate;
+
         println!("Medium stratum rate: {:.2} -> {:.2}", before, after);
         assert!(after > before); // Should increase due to high anomaly rate
     }
@@ -438,30 +463,29 @@ mod tests {
     #[test]
     fn test_epsilon_greedy() {
         let mut bandit = EpsilonGreedyBandit::new(
-            0.1, 
-            vec!["arm1".to_string(), "arm2".to_string(), "arm3".to_string()]
+            0.1,
+            vec!["arm1".to_string(), "arm2".to_string(), "arm3".to_string()],
         );
-        
+
         // Simulate: arm2 is best
         for _ in 0..100 {
             let arm = bandit.select();
             let reward = if arm == 1 { 1.0 } else { 0.0 }; // arm2 (index 1) is best
             bandit.update(arm, reward);
         }
-        
+
         let stats = bandit.arm_stats();
         println!("Bandit stats: {:?}", stats);
-        
+
         // arm2 should have highest average reward
         assert!(stats[1].2 >= stats[0].2 || stats[1].2 >= stats[2].2);
     }
 
+    #[cfg(feature = "experimental")]
     #[test]
     fn test_thompson_sampling() {
-        let mut bandit = ThompsonSamplingBandit::new(
-            vec!["A".to_string(), "B".to_string()]
-        );
-        
+        let mut bandit = ThompsonSamplingBandit::new(vec!["A".to_string(), "B".to_string()]);
+
         // Arm A has higher success rate
         for _ in 0..50 {
             let arm = bandit.select();
@@ -474,12 +498,20 @@ mod tests {
             };
             bandit.update(arm, success);
         }
-        
-        println!("Thompson arm 0: alpha={:.1}, beta={:.1}, ev={:.3}",
-            bandit.arms[0].alpha, bandit.arms[0].beta, bandit.arms[0].expected_value());
-        println!("Thompson arm 1: alpha={:.1}, beta={:.1}, ev={:.3}",
-            bandit.arms[1].alpha, bandit.arms[1].beta, bandit.arms[1].expected_value());
-        
+
+        println!(
+            "Thompson arm 0: alpha={:.1}, beta={:.1}, ev={:.3}",
+            bandit.arms[0].alpha,
+            bandit.arms[0].beta,
+            bandit.arms[0].expected_value()
+        );
+        println!(
+            "Thompson arm 1: alpha={:.1}, beta={:.1}, ev={:.3}",
+            bandit.arms[1].alpha,
+            bandit.arms[1].beta,
+            bandit.arms[1].expected_value()
+        );
+
         // Arm 0 should have higher expected value
         assert!(bandit.arms[0].expected_value() > bandit.arms[1].expected_value());
     }
@@ -487,13 +519,13 @@ mod tests {
     #[test]
     fn test_sampling_stratum() {
         let mut stratum = SamplingStratum::new(RiskLevel::High);
-        
+
         assert_eq!(stratum.sampling_rate, 0.5); // Default for High
-        
+
         stratum.record_sample(true);
         stratum.record_sample(false);
         stratum.record_sample(true);
-        
+
         assert_eq!(stratum.sample_count, 3);
         assert_eq!(stratum.anomaly_count, 2);
         assert!((stratum.anomaly_rate() - 0.667).abs() < 0.01);
