@@ -37,7 +37,13 @@ pub struct DelegationChain {
 impl DelegationToken {
     /// Canonical message that is signed.  Null-byte separated to prevent
     /// field injection attacks.
-    fn canonical(delegator: &str, delegatee: &str, issued_at: &str, expires_at: &str, scope: &str) -> String {
+    fn canonical(
+        delegator: &str,
+        delegatee: &str,
+        issued_at: &str,
+        expires_at: &str,
+        scope: &str,
+    ) -> String {
         format!("A2A\0{delegator}\0{delegatee}\0{issued_at}\0{expires_at}\0{scope}")
     }
 
@@ -68,21 +74,23 @@ impl DelegationToken {
     /// Verify this token's cryptographic signature and check expiry.
     pub fn verify(&self) -> Result<(), DelegationError> {
         // Decode the public key.
-        let pubkey_bytes = B64.decode(&self.delegator_pubkey)
+        let pubkey_bytes = B64
+            .decode(&self.delegator_pubkey)
             .map_err(|_| DelegationError::InvalidKey)?;
         if pubkey_bytes.len() != 32 {
             return Err(DelegationError::InvalidKey);
         }
         let mut key_arr = [0u8; 32];
         key_arr.copy_from_slice(&pubkey_bytes);
-        let verifying_key = VerifyingKey::from_bytes(&key_arr)
-            .map_err(|_| DelegationError::InvalidKey)?;
+        let verifying_key =
+            VerifyingKey::from_bytes(&key_arr).map_err(|_| DelegationError::InvalidKey)?;
 
         // Decode and verify signature.
-        let sig_bytes = B64.decode(&self.signature)
+        let sig_bytes = B64
+            .decode(&self.signature)
             .map_err(|_| DelegationError::InvalidSignature)?;
-        let sig = Signature::from_slice(&sig_bytes)
-            .map_err(|_| DelegationError::InvalidSignature)?;
+        let sig =
+            Signature::from_slice(&sig_bytes).map_err(|_| DelegationError::InvalidSignature)?;
         let message = Self::canonical(
             &self.delegator,
             &self.delegatee,
@@ -90,7 +98,8 @@ impl DelegationToken {
             &self.expires_at,
             &self.scope,
         );
-        verifying_key.verify(message.as_bytes(), &sig)
+        verifying_key
+            .verify(message.as_bytes(), &sig)
             .map_err(|_| DelegationError::InvalidSignature)?;
 
         // Check expiry.
@@ -164,7 +173,10 @@ impl std::fmt::Display for DelegationError {
                 write!(f, "delegation chain depth {depth} exceeds max {max}")
             }
             Self::BrokenChain { expected, got } => {
-                write!(f, "broken chain: expected delegator '{expected}', got '{got}'")
+                write!(
+                    f,
+                    "broken chain: expected delegator '{expected}', got '{got}'"
+                )
             }
         }
     }
@@ -191,7 +203,9 @@ mod tests {
         let sk_b = SigningKey::generate(&mut OsRng);
         let t1 = DelegationToken::sign("agent-a", "agent-b", "validate", 300, &sk_a);
         let t2 = DelegationToken::sign("agent-b", "agent-c", "validate", 300, &sk_b);
-        let chain = DelegationChain { tokens: vec![t1, t2] };
+        let chain = DelegationChain {
+            tokens: vec![t1, t2],
+        };
         assert!(chain.validate(3).is_ok());
         assert_eq!(chain.terminal_agent(), Some("agent-c"));
         assert_eq!(chain.depth(), 2);
@@ -215,7 +229,9 @@ mod tests {
         let t1 = DelegationToken::sign("agent-a", "agent-b", "", 300, &sk_a);
         // Wrong delegator — should be agent-b but is agent-c.
         let t2 = DelegationToken::sign("agent-c", "agent-d", "", 300, &sk_c);
-        let chain = DelegationChain { tokens: vec![t1, t2] };
+        let chain = DelegationChain {
+            tokens: vec![t1, t2],
+        };
         assert!(matches!(
             chain.validate(5),
             Err(DelegationError::BrokenChain { .. })

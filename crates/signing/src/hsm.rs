@@ -134,7 +134,11 @@ pub struct YubiHsmBackend {
 
 impl YubiHsmBackend {
     /// Create a YubiHSM backend. Returns error until the `yubihsm` crate is wired in.
-    pub fn connect(_connector_url: &str, _auth_key_id: u16, _password: &str) -> Result<Self, BackendError> {
+    pub fn connect(
+        _connector_url: &str,
+        _auth_key_id: u16,
+        _password: &str,
+    ) -> Result<Self, BackendError> {
         Err(BackendError::Unavailable(
             "YubiHSM support requires the 'yubihsm' feature flag".into(),
         ))
