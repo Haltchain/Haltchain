@@ -8,10 +8,9 @@
 //!   - Behavioral fingerprint divergence
 
 use haltchain_embeddings::{
-    ClarificationDecision, ClarificationProtocol, DriftResult, DriftScorer, GoalStore,
-    LocalModel, DRIFT_THRESHOLD,
-    ConversationStore, ConversationRecord, DriftAction,
-    BehavioralFingerprinter, BehaviorRecord, ActionStep, BehaviorDriftAction,
+    ActionStep, BehaviorDriftAction, BehaviorRecord, BehavioralFingerprinter,
+    ClarificationDecision, ClarificationProtocol, ConversationRecord, ConversationStore,
+    DRIFT_THRESHOLD, DriftAction, DriftResult, DriftScorer, GoalStore, LocalModel,
     action_sequence_to_text,
 };
 
@@ -34,8 +33,11 @@ fn gradual_drift_triggers_clarification_within_window() {
     for _ in 0..4 {
         let a = embed("analyze customer support tickets and summarize trends");
         let r = scorer.push("agent-1:sess-1", &goal, &a);
-        assert!(r.window_mean > DRIFT_THRESHOLD,
-            "identical action should stay above threshold: mean={:.3}", r.window_mean);
+        assert!(
+            r.window_mean > DRIFT_THRESHOLD,
+            "identical action should stay above threshold: mean={:.3}",
+            r.window_mean
+        );
     }
 
     // Now inject increasingly different text to drag the mean down
@@ -58,8 +60,11 @@ fn gradual_drift_triggers_clarification_within_window() {
     let last = final_result.unwrap();
     // After injecting 6 unrelated actions into a window of 10 (with 4 good),
     // the trend slope should be negative.
-    assert!(last.trend_slope < 0.0,
-        "trend slope should be negative after drift: {:.4}", last.trend_slope);
+    assert!(
+        last.trend_slope < 0.0,
+        "trend slope should be negative after drift: {:.4}",
+        last.trend_slope
+    );
 }
 
 // ─── 2. Hard goal hijack (sudden pivot) ──────────────────────────────────────
@@ -84,12 +89,17 @@ fn hard_goal_hijack_detected_immediately() {
     let r = scorer.push("agent-2:sess-1", &goal, &hijack);
 
     // The individual similarity should be very low
-    assert!(r.similarity < 0.5,
-        "hijacked action similarity should be low: {:.3}", r.similarity);
+    assert!(
+        r.similarity < 0.5,
+        "hijacked action similarity should be low: {:.3}",
+        r.similarity
+    );
 
     // Trend slope should go negative
-    assert!(r.trend_slope < 0.0,
-        "trend should become negative after hijack");
+    assert!(
+        r.trend_slope < 0.0,
+        "trend should become negative after hijack"
+    );
 }
 
 // ─── 3. Synonym / paraphrase evasion ────────────────────────────────────────
@@ -129,13 +139,18 @@ fn synonym_rewrite_does_not_evade_drift_detection() {
         }
     }
 
-    assert!(saw_drop,
-        "non-identical text should produce measurably lower similarity than goal-identical text");
+    assert!(
+        saw_drop,
+        "non-identical text should produce measurably lower similarity than goal-identical text"
+    );
 
     // Window mean should have dropped from ~1.0 baseline
     let mean = scorer.window_mean("portfolio-agent:s1").unwrap();
-    assert!(mean < 0.99,
-        "window mean should drop below 1.0 after non-identical injections: {:.3}", mean);
+    assert!(
+        mean < 0.99,
+        "window mean should drop below 1.0 after non-identical injections: {:.3}",
+        mean
+    );
 }
 
 // ─── 4. ClarificationProtocol triggers on crafted DriftResult ───────────────
@@ -149,15 +164,23 @@ fn clarification_fires_on_low_mean() {
         window_mean: 0.15,
         trend_slope: -0.05,
         window_len: 5,
+        cumulative_drift: None,
     };
 
     let decision = proto.check(&dr);
-    assert!(decision.is_required(),
+    assert!(
+        decision.is_required(),
         "should require clarification when mean={:.2} < threshold={:.2}",
-        dr.window_mean, DRIFT_THRESHOLD);
+        dr.window_mean,
+        DRIFT_THRESHOLD
+    );
 
     match decision {
-        ClarificationDecision::RequireClarification { current_mean, threshold, .. } => {
+        ClarificationDecision::RequireClarification {
+            current_mean,
+            threshold,
+            ..
+        } => {
             assert!((current_mean - 0.15).abs() < 1e-9);
             assert!((threshold - DRIFT_THRESHOLD).abs() < 1e-9);
         }
@@ -174,6 +197,7 @@ fn clarification_does_not_fire_on_healthy_mean() {
         window_mean: 0.75,
         trend_slope: 0.01,
         window_len: 10,
+        cumulative_drift: None,
     };
 
     assert_eq!(proto.check(&dr), ClarificationDecision::Continue);
@@ -188,7 +212,12 @@ fn goal_store_revoke_and_redeclare_resets_drift_context() {
 
     // Declare goal
     let goal_vec = embed("summarize financial reports");
-    store.declare("agent-3", "s1", "summarize financial reports", goal_vec.clone());
+    store.declare(
+        "agent-3",
+        "s1",
+        "summarize financial reports",
+        goal_vec.clone(),
+    );
 
     // Push some actions
     for _ in 0..4 {
@@ -201,7 +230,12 @@ fn goal_store_revoke_and_redeclare_resets_drift_context() {
     scorer.clear("agent-3:s1");
 
     let new_goal = embed("audit compliance procedures");
-    store.declare("agent-3", "s1", "audit compliance procedures", new_goal.clone());
+    store.declare(
+        "agent-3",
+        "s1",
+        "audit compliance procedures",
+        new_goal.clone(),
+    );
 
     // First action after re-declaration should start fresh
     let a = embed("review regulatory framework for SOX compliance");
@@ -235,7 +269,11 @@ fn conversation_drift_detects_semantic_pivot() {
             embedding: embed(&text),
         });
         if let Some(r) = &report {
-            if worst_report.as_ref().is_none_or(|prev: &haltchain_embeddings::ConversationDriftReport| r.semantic_drift > prev.semantic_drift) {
+            if worst_report.as_ref().is_none_or(
+                |prev: &haltchain_embeddings::ConversationDriftReport| {
+                    r.semantic_drift > prev.semantic_drift
+                },
+            ) {
                 worst_report = report;
             }
         }
@@ -244,8 +282,12 @@ fn conversation_drift_detects_semantic_pivot() {
     let report = worst_report.expect("should have drift reports after baseline");
     // The centroid shift from "customer support" to "SQL injection" should
     // trigger at least monitoring.
-    assert_ne!(report.recommendation, DriftAction::Maintain,
-        "malicious pivot should not be Maintain: drift={:.3}", report.semantic_drift);
+    assert_ne!(
+        report.recommendation,
+        DriftAction::Maintain,
+        "malicious pivot should not be Maintain: drift={:.3}",
+        report.semantic_drift
+    );
 }
 
 // ─── 7. Behavioral fingerprint drift ───────────────────────────────────────
@@ -287,16 +329,24 @@ fn behavioral_fingerprint_catches_action_pattern_change() {
             embedding: embed(&text),
         });
         if let Some(r) = &report {
-            if worst.as_ref().is_none_or(|prev: &haltchain_embeddings::BehaviorDriftReport| r.behavioral_drift > prev.behavioral_drift) {
+            if worst
+                .as_ref()
+                .is_none_or(|prev: &haltchain_embeddings::BehaviorDriftReport| {
+                    r.behavioral_drift > prev.behavioral_drift
+                })
+            {
                 worst = report;
             }
         }
     }
 
     let report = worst.expect("should have behavioral drift reports");
-    assert_ne!(report.recommendation, BehaviorDriftAction::Maintain,
+    assert_ne!(
+        report.recommendation,
+        BehaviorDriftAction::Maintain,
         "credential-stealing pattern should not be Maintain: drift={:.3}",
-        report.behavioral_drift);
+        report.behavioral_drift
+    );
 }
 
 //Bulk adversarial corpus
@@ -339,13 +389,18 @@ fn bulk_adversarial_corpus_no_false_negatives() {
         }
     }
 
-    assert!(all_below_identity,
-        "every adversarial pivot should have similarity < 1.0 vs goal");
+    assert!(
+        all_below_identity,
+        "every adversarial pivot should have similarity < 1.0 vs goal"
+    );
 
     let final_mean = scorer.window_mean("weather-agent:s1").unwrap();
-    assert!(final_mean < baseline_mean,
+    assert!(
+        final_mean < baseline_mean,
         "window mean after adversarial corpus ({:.3}) should be < baseline ({:.3})",
-        final_mean, baseline_mean);
+        final_mean,
+        baseline_mean
+    );
 }
 
 // ─── 9. Multi-agent isolation ───────────────────────────────────────────────
@@ -377,9 +432,12 @@ fn drift_scorer_isolates_sessions() {
     // Agent B's window should be unaffected by Agent A's drift
     let b_mean = scorer.window_mean("agent-b:s1").unwrap();
     let a_mean = scorer.window_mean("agent-a:s1").unwrap();
-    assert!(b_mean > a_mean,
+    assert!(
+        b_mean > a_mean,
         "agent B (on-task) should have higher mean ({:.3}) than drifting agent A ({:.3})",
-        b_mean, a_mean);
+        b_mean,
+        a_mean
+    );
 }
 
 // ─── 10. Performance: 1000 push calls under 500ms ─────────────────────────
@@ -399,8 +457,11 @@ fn drift_scorer_throughput() {
 
     let start = std::time::Instant::now();
 
-    let goal = model.embed_batch_sync(&["process insurance claims for natural disasters"])
-        .into_iter().next().unwrap();
+    let goal = model
+        .embed_batch_sync(&["process insurance claims for natural disasters"])
+        .into_iter()
+        .next()
+        .unwrap();
 
     // Embed the 50 distinct templates in one batch
     let template_embeddings = model.embed_batch_sync(&template_refs);
@@ -413,6 +474,9 @@ fn drift_scorer_throughput() {
     let elapsed = start.elapsed();
 
     // 50 unique embeddings + 1000 scorer pushes should complete under 500ms
-    assert!(elapsed.as_millis() < 500,
-        "1000 drift pushes took {}ms (limit 500ms)", elapsed.as_millis());
+    assert!(
+        elapsed.as_millis() < 500,
+        "1000 drift pushes took {}ms (limit 500ms)",
+        elapsed.as_millis()
+    );
 }

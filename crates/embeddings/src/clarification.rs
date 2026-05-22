@@ -87,6 +87,7 @@ mod tests {
             window_mean: mean,
             trend_slope: 0.0,
             window_len: len,
+            cumulative_drift: None,
         }
     }
 
