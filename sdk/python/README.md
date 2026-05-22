@@ -14,8 +14,8 @@ pip install "haltchain[langchain]"   # optional LangChain callback integration
 pip install "haltchain[redis]"       # optional Redis cache backend
 ```
 
-**Hosted validator:** `https://haltchain-consensus.fly.dev`
-(3-node Raft cluster, US-East region, Fly.io)
+**Validator endpoint:** `https://your-validator.example.com`
+(set to your environment-specific HaltChain API base URL)
 
 Default usage is intentionally simple: install `haltchain`, set `agent_id` and `api_key`, and call `check` or `@validate`. Advanced features stay opt-in through extras.
 
