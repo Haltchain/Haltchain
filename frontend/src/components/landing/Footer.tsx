@@ -16,7 +16,7 @@ export function Footer() {
               </span>
             </div>
             <p className="text-muted-foreground max-w-sm">
-              Cryptographic guardrails for autonomous AI systems. Because intent without verification is dangerous.
+              Compliance infrastructure for autonomous systems, with signed decisions, operator review, and audit evidence before actions execute.
             </p>
           </div>
 
@@ -33,10 +33,10 @@ export function Footer() {
           <div>
             <h4 className="font-semibold text-foreground mb-4">Resources</h4>
             <ul className="space-y-3 text-muted-foreground">
-              <li><a href="#" className="hover:text-primary transition-colors">Documentation</a></li>
-              <li><a href="#" className="hover:text-primary transition-colors">API Reference</a></li>
-              <li><a href="#" className="hover:text-primary transition-colors">Blog</a></li>
-              <li><a href="#" className="hover:text-primary transition-colors">Security</a></li>
+              <li><a href="/dashboard" className="hover:text-primary transition-colors">Dashboard</a></li>
+              <li><a href="/dashboard/review-queue" className="hover:text-primary transition-colors">Review Queue</a></li>
+              <li><a href="/dashboard/thresholds" className="hover:text-primary transition-colors">Threshold Ops</a></li>
+              <li><a href="#sales" className="hover:text-primary transition-colors">Contact Sales</a></li>
             </ul>
           </div>
 
@@ -47,15 +47,15 @@ export function Footer() {
             © {currentYear} Haltchain Inc. All rights reserved.
           </p>
           <div className="flex space-x-6 mt-4 md:mt-0 text-muted-foreground">
-            <a href="#" className="hover:text-foreground transition-colors">
+            <a href="#sales" className="hover:text-foreground transition-colors">
               <Twitter className="w-5 h-5" />
               <span className="sr-only">Twitter</span>
             </a>
-            <a href="#" className="hover:text-foreground transition-colors">
+            <a href="https://github.com/Haltchain/Haltchain" className="hover:text-foreground transition-colors">
               <Github className="w-5 h-5" />
               <span className="sr-only">GitHub</span>
             </a>
-            <a href="#" className="hover:text-foreground transition-colors">
+            <a href="#demo" className="hover:text-foreground transition-colors">
               <Disc className="w-5 h-5" />
               <span className="sr-only">Discord</span>
             </a>

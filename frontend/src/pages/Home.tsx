@@ -25,9 +25,9 @@ export default function Home() {
           type="demo"
           alignment="left"
           title={
-            <>Ready to secure your <span className="text-primary">Agents?</span></>
+            <>Ready to operationalize <span className="text-primary">AI Compliance?</span></>
           }
-          description="Get a personalized walkthrough of the Haltchain engine. See how we can integrate cryptographic guardrails directly into your existing AI workflows in under 30 minutes."
+          description="Get a walkthrough of the Haltchain control plane, including review queue flows, threshold variants, risk advisories, and signed audit evidence for agent-driven actions."
         />
 
         {/* Contact Sales Section */}
@@ -36,9 +36,9 @@ export default function Home() {
           type="sales"
           alignment="right"
           title={
-            <>Mission-Critical <span className="text-primary">Deployments</span></>
+            <>Compliance Programs for <span className="text-primary">Regulated Systems</span></>
           }
-          description="Managing billions in TVL or sensitive enterprise data? Talk to our sales engineering team to discuss custom anomaly models, SLA requirements, and on-premise solutions."
+          description="Running trading, healthcare, or critical operational workflows? Talk to sales engineering about sidecar deployment, private networking, audit evidence requirements, and enterprise support."
         />
       </main>
 

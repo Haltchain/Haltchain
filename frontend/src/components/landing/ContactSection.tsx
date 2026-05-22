@@ -101,7 +101,7 @@ export function ContactSection({ id, type, title, description, alignment }: Cont
             <label className="text-sm font-medium text-foreground">Full Name</label>
             <Input 
               {...register("name")} 
-              placeholder="Satoshi Nakamoto"
+              placeholder="Alex Morgan"
               className="bg-background/50 border-border h-12 focus-visible:ring-primary/50"
             />
             {errors.name && <p className="text-xs text-destructive">{errors.name.message}</p>}
@@ -110,7 +110,7 @@ export function ContactSection({ id, type, title, description, alignment }: Cont
             <label className="text-sm font-medium text-foreground">Work Email</label>
             <Input 
               {...register("email")} 
-              placeholder="satoshi@bitcoin.org" 
+              placeholder="alex@company.com" 
               type="email"
               className="bg-background/50 border-border h-12 focus-visible:ring-primary/50"
             />
@@ -122,7 +122,7 @@ export function ContactSection({ id, type, title, description, alignment }: Cont
           <label className="text-sm font-medium text-foreground">Company</label>
           <Input 
             {...register("company")} 
-            placeholder="Bitcoin Foundation"
+            placeholder="Northwind Capital"
             className="bg-background/50 border-border h-12 focus-visible:ring-primary/50"
           />
           {errors.company && <p className="text-xs text-destructive">{errors.company.message}</p>}
@@ -132,8 +132,8 @@ export function ContactSection({ id, type, title, description, alignment }: Cont
           <label className="text-sm font-medium text-foreground">How can we help?</label>
           <Textarea 
             {...register("message")} 
-            placeholder="Tell us about your agent infrastructure and governance needs..."
-            className="bg-background/50 border-border min-h-[120px] resize-none focus-visible:ring-primary/50"
+            placeholder="Tell us about your agent infrastructure, approval workflows, and audit requirements..."
+            className="bg-background/50 border-border min-h-30 resize-none focus-visible:ring-primary/50"
           />
           {errors.message && <p className="text-xs text-destructive">{errors.message.message}</p>}
         </div>
@@ -159,7 +159,7 @@ export function ContactSection({ id, type, title, description, alignment }: Cont
   return (
     <section id={id} className="py-24 border-t border-border/50 relative overflow-hidden">
       {/* Decorative background glow */}
-      <div className={`absolute top-1/2 -translate-y-1/2 w-[500px] h-[500px] bg-primary/5 rounded-full blur-[100px] pointer-events-none ${alignment === 'left' ? '-right-[200px]' : '-left-[200px]'}`} />
+      <div className={`absolute top-1/2 -translate-y-1/2 w-125 h-125 bg-primary/5 rounded-full blur-[100px] pointer-events-none ${alignment === 'left' ? '-right-50' : '-left-50'}`} />
       
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-16 lg:gap-24 items-center">

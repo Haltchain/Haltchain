@@ -25,7 +25,6 @@ export function Navbar() {
     { name: "How It Works", href: "#how-it-works" },
     { name: "Use Cases", href: "#use-cases" },
     { name: "Pricing", href: "#pricing" },
-    { name: "Docs", href: "#" },
   ];
 
   return (
@@ -65,7 +64,7 @@ export function Navbar() {
               variant="outline"
               className="border-primary/50 text-primary hover:bg-primary/10 hover:text-primary transition-all duration-300 shadow-[0_0_15px_rgba(0,255,102,0.1)] hover:shadow-[0_0_25px_rgba(0,255,102,0.2)]"
             >
-              Unlock Dashboard
+              Open Control Plane
             </Button>
           </div>
 
@@ -102,7 +101,7 @@ export function Navbar() {
               }}
               className="w-full bg-primary/10 text-primary border border-primary hover:bg-primary/20"
             >
-              Unlock Dashboard
+              Open Control Plane
             </Button>
           </div>
         </div>

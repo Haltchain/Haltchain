@@ -9,6 +9,7 @@ import { useToast } from "@/hooks/use-toast";
 import {
   getReviewQueue,
   getVersionLineage,
+  type AdversarialSuiteResult,
   type ImprovementDecision,
   type VersionLineageEntry,
 } from "@/lib/admin-api";
@@ -45,14 +46,17 @@ function decisionVariant(
   }
 }
 
-function AdversarialBar({ passed, total }: { passed: number; total: number }) {
-  const pct = total > 0 ? Math.round((passed / total) * 100) : 0;
-  const ok = pct >= 95;
+function AdversarialBar({ result }: { result: AdversarialSuiteResult }) {
+  const pct =
+    result.total_cases > 0
+      ? Math.round((result.passed / result.total_cases) * 100)
+      : Math.round(result.pass_rate * 100);
+  const ok = result.gate_passed;
   return (
     <div className="space-y-1">
       <div className="flex justify-between text-xs text-muted-foreground">
         <span>
-          {passed}/{total} adversarial tests
+          {result.passed}/{result.total_cases} adversarial tests
         </span>
         <span className={ok ? "text-emerald-400" : "text-red-400"}>{pct}%</span>
       </div>
@@ -84,12 +88,7 @@ function LineageCard({ entry }: { entry: VersionLineageEntry }) {
         </div>
       </div>
 
-      {entry.adversarial_result && (
-        <AdversarialBar
-          passed={entry.adversarial_result.passed}
-          total={entry.adversarial_result.total_cases}
-        />
-      )}
+      {entry.adversarial_result && <AdversarialBar result={entry.adversarial_result} />}
 
       <div className="grid grid-cols-2 gap-x-4 gap-y-0.5 text-xs text-muted-foreground">
         <span>Goal changed: {diff.goal_changed ? "Yes" : "No"}</span>

@@ -5,26 +5,26 @@ export function HowItWorks() {
   const steps = [
     {
       num: "01",
-      title: "Agent submits action",
-      desc: "The autonomous agent requests permission to execute a high-stakes action via the API.",
+      title: "Action crosses the control plane",
+      desc: "An agent action flows through the Haltchain sidecar or API before it can touch money, data, or production systems.",
       icon: <Bot className="w-6 h-6 text-primary" />
     },
     {
       num: "02",
-      title: "Policy engine validates",
-      desc: "Haltchain evaluates the request against your custom cryptographic rule sets.",
+      title: "Policy and thresholds validate",
+      desc: "The engine evaluates scopes, thresholds, and domain controls before the action is allowed to continue.",
       icon: <ShieldAlert className="w-6 h-6 text-primary" />
     },
     {
       num: "03",
-      title: "EWMA/anomaly check",
-      desc: "Velocity guards and statistical models analyze the request for abnormal behavior.",
+      title: "Risk is scored or escalated",
+      desc: "Velocity guards, anomaly detection, and review rules decide whether the action proceeds automatically or lands in the review queue.",
       icon: <Activity className="w-6 h-6 text-primary" />
     },
     {
       num: "04",
-      title: "Decision logged",
-      desc: "The approved action is cryptographically signed and logged to an immutable audit trail.",
+      title: "Decision becomes audit evidence",
+      desc: "Each decision is signed, timestamped, and persisted so compliance teams can reconstruct what happened and why.",
       icon: <LinkIcon className="w-6 h-6 text-primary" />
     }
   ];
@@ -34,10 +34,10 @@ export function HowItWorks() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 relative z-10">
         <div className="text-center mb-20">
           <h2 className="text-3xl md:text-5xl font-display font-bold text-foreground">
-            How It <span className="text-primary">Works</span>
+            Your Compliance <span className="text-primary">Control Plane</span>
           </h2>
           <p className="mt-4 text-muted-foreground text-lg max-w-2xl mx-auto">
-            A seamless intercept layer between your AI's intentions and its execution context.
+            A network-level intercept layer between orchestration frameworks and real-world side effects.
           </p>
         </div>
 

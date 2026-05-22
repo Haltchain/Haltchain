@@ -6,29 +6,29 @@ import { Card, CardHeader, CardTitle, CardContent, CardFooter } from "@/componen
 export function Pricing() {
   const tiers = [
     {
-      name: "Open Source",
-      price: "Free",
-      desc: "Self-hosted core engine",
-      features: ["Local decision engine", "Basic anomaly detection", "Community support"],
+      name: "Open Source Core",
+      price: "Self-hosted",
+      desc: "For internal evaluation and local integration work",
+      features: ["Validator and policy engine", "Local dashboard access", "Community-driven adoption"],
       button: "View GitHub",
       highlight: false,
-      action: () => window.open('#', '_blank')
+      action: () => window.open('https://github.com/Haltchain/Haltchain', '_blank')
     },
     {
-      name: "Pro",
-      price: "$499",
-      period: "/mo",
-      desc: "Fully hosted with dashboard",
-      features: ["Managed infrastructure", "Visual policy builder", "Real-time analytics", "Email support"],
-      button: "Start Free Trial",
+      name: "Private Pilot",
+      price: "Custom",
+      desc: "Scoped deployment for regulated or high-stakes teams",
+      features: ["Sidecar rollout plan", "Review queue and threshold operations", "Implementation support", "Defined success criteria"],
+      button: "Book a Pilot",
       highlight: true,
       action: () => document.getElementById('demo')?.scrollIntoView({ behavior: 'smooth' })
     },
     {
       name: "Enterprise",
-      price: "Custom",
-      desc: "For mission-critical deployments",
-      features: ["Custom anomaly models", "On-premise deployment", "Dedicated success manager", "99.99% SLA"],
+      price: "$100K+",
+      period: "/yr",
+      desc: "Compliance infrastructure for production environments",
+      features: ["Private deployment options", "Signed audit evidence and operator workflows", "Enterprise support model", "Custom SLA and architecture review"],
       button: "Contact Sales",
       highlight: false,
       action: () => document.getElementById('sales')?.scrollIntoView({ behavior: 'smooth' })
@@ -40,8 +40,11 @@ export function Pricing() {
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
         <div className="text-center mb-20">
           <h2 className="text-3xl md:text-5xl font-display font-bold text-foreground">
-            Simple, Transparent <span className="text-primary">Pricing</span>
+            Deployment <span className="text-primary">Paths</span>
           </h2>
+          <p className="mt-4 text-muted-foreground text-lg max-w-2xl mx-auto">
+            The commercial path is enterprise-first. Start locally, run a scoped pilot, or deploy a full compliance control plane.
+          </p>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-8 max-w-5xl mx-auto items-center">
@@ -62,7 +65,7 @@ export function Pricing() {
                 {tier.highlight && (
                   <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2">
                     <span className="bg-primary text-primary-foreground text-xs font-bold uppercase tracking-wider py-1 px-3 rounded-full">
-                      Most Popular
+                      Recommended
                     </span>
                   </div>
                 )}

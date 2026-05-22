@@ -31,18 +31,18 @@ export function Hero() {
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-primary opacity-75"></span>
               <span className="relative inline-flex rounded-full h-2 w-2 bg-primary"></span>
             </span>
-            Haltchain v1.0 is now live
+            Compliance control plane for agentic systems
           </div>
 
           <h1 className="text-5xl sm:text-6xl lg:text-7xl font-display font-extrabold tracking-tight text-foreground leading-[1.1]">
-            Real-time Governance <br className="hidden sm:block" />
+            Compliance Infrastructure <br className="hidden sm:block" />
             <span className="text-transparent bg-clip-text bg-gradient-to-r from-primary to-emerald-300 drop-shadow-[0_0_30px_rgba(0,255,102,0.4)]">
-              for AI Agents
+              for Autonomous Systems
             </span>
           </h1>
           
           <p className="text-lg sm:text-xl text-muted-foreground max-w-2xl mx-auto leading-relaxed">
-            Secure your autonomous AI systems with real-time guardrails. Intercept, validate, and enforce every agent decision before it executes.
+            Deploy Haltchain beside LangGraph, CrewAI, or OpenClaw to intercept actions, enforce policy, route high-risk decisions to review, and preserve signed audit evidence before execution.
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 pt-4">
@@ -58,10 +58,10 @@ export function Hero() {
               size="lg"
               variant="outline"
               className="w-full sm:w-auto h-14 px-8 text-lg font-semibold border-border hover:bg-white/5 hover:text-foreground transition-all duration-300 rounded-xl"
-              onClick={() => window.open('#', '_blank')}
+              onClick={() => window.location.assign(`${import.meta.env.BASE_URL}dashboard`)}
             >
               <FileCode2 className="mr-2 w-5 h-5 text-muted-foreground" />
-              Read the Docs
+              Open Dashboard
             </Button>
           </div>
         </motion.div>
@@ -75,7 +75,7 @@ export function Hero() {
         >
           <div className="flex items-center px-6 py-4 rounded-2xl border border-border bg-card/60 backdrop-blur-md shadow-lg w-full md:w-auto justify-center group hover:border-primary/30 transition-colors">
             <div className="w-3 h-3 rounded-full bg-blue-500 mr-3" />
-            <span className="font-semibold text-muted-foreground group-hover:text-foreground transition-colors">LLM Agent</span>
+            <span className="font-semibold text-muted-foreground group-hover:text-foreground transition-colors">Agent Runtime</span>
           </div>
 
           <div className="text-muted-foreground hidden md:flex animate-pulse">
@@ -88,7 +88,7 @@ export function Hero() {
           <div className="relative flex items-center px-8 py-5 rounded-2xl border-2 border-primary bg-primary/10 backdrop-blur-md shadow-[0_0_40px_rgba(0,255,102,0.2)] w-full md:w-auto justify-center overflow-hidden">
             <div className="absolute inset-0 bg-gradient-to-r from-primary/0 via-primary/20 to-primary/0 translate-x-[-100%] animate-[shimmer_3s_infinite]" />
             <span className="font-display font-bold text-xl text-primary drop-shadow-[0_0_10px_rgba(0,255,102,0.8)] z-10">
-              Haltchain
+              Haltchain Sidecar
             </span>
           </div>
 
@@ -101,7 +101,7 @@ export function Hero() {
 
           <div className="flex items-center px-6 py-4 rounded-2xl border border-border bg-card/60 backdrop-blur-md shadow-lg w-full md:w-auto justify-center group hover:border-primary/30 transition-colors">
             <div className="w-3 h-3 rounded-full bg-purple-500 mr-3" />
-            <span className="font-semibold text-muted-foreground group-hover:text-foreground transition-colors">Audit Log</span>
+            <span className="font-semibold text-muted-foreground group-hover:text-foreground transition-colors">Compliance Record</span>
           </div>
         </motion.div>
       </div>

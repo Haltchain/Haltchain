@@ -5,34 +5,39 @@ import { Card, CardHeader, CardTitle, CardDescription } from "@/components/ui/ca
 export function Features() {
   const features = [
     {
-      title: "Decision Engine",
-      description: "Robust rules engine capable of parsing complex state conditions before any action executes.",
+      title: "Policy Enforcement API",
+      description: "Gate every high-stakes action through a central decision engine before it reaches downstream systems.",
       icon: <Zap className="w-6 h-6 text-primary" />
     },
     {
-      title: "EWMA Velocity Guard",
-      description: "Exponentially Weighted Moving Average guards prevent sudden spikes in agent activity.",
+      title: "Behavioral Anomaly Detection",
+      description: "Velocity guards and anomaly models flag behavior shifts that pure policy checks miss.",
       icon: <TrendingUp className="w-6 h-6 text-primary" />
     },
     {
-      title: "Anomaly Detection",
-      description: "Statistical modeling catches out-of-distribution commands that bypass traditional rules.",
+      title: "Decision Review Queue",
+      description: "Escalate sensitive actions to humans with review workflows instead of letting risky automation run unchecked.",
+      icon: <TrendingUp className="w-6 h-6 text-primary" />
+    },
+    {
+      title: "Audit-grade trails",
+      description: "Tamper-evident logging, optional decision signing, Postgres hash-chained decisions, and SIEM-friendly exports — built for evidence, not vanity metrics.",
       icon: <ShieldCheck className="w-6 h-6 text-primary" />
     },
     {
-      title: "Cryptographic Audit Trail",
-      description: "Every decision is cryptographically signed and logged, providing an immutable record for compliance.",
+      title: "Threshold Operations",
+      description: "Adjust guardrails per tenant or agent without redeploying the calling application.",
       icon: <Layers className="w-6 h-6 text-primary" />
     },
     {
-      title: "Threshold Tuning",
-      description: "Dynamically adjust safety parameters via API without redeploying your agent code.",
-      icon: <Sliders className="w-6 h-6 text-primary" />
+      title: "Canary Variants",
+      description: "Roll out threshold variants gradually and compare operational behavior before making changes global.",
+      icon: <SplitSquareHorizontal className="w-6 h-6 text-primary" />
     },
     {
-      title: "A/B Policy Variants",
-      description: "Test new governance policies on shadow traffic before enforcing them in production.",
-      icon: <SplitSquareHorizontal className="w-6 h-6 text-primary" />
+      title: "Risk Advisories",
+      description: "Publish cross-agent advisories when a risky pattern appears so operators see cascading issues early.",
+      icon: <Sliders className="w-6 h-6 text-primary" />
     }
   ];
 
@@ -46,7 +51,7 @@ export function Features() {
             Enterprise-Grade <span className="text-primary">Features</span>
           </h2>
           <p className="mt-4 text-muted-foreground text-lg max-w-2xl mx-auto">
-            Everything you need to confidently deploy autonomous systems into production.
+            Controls that map to approval workflows, operator review, and audit evidence instead of generic AI safety marketing.
           </p>
         </div>
 
