@@ -3,6 +3,8 @@
 //! Cache key = SHA-256( agent_id || action_type || amount_bucket || action_count_bucket )
 //! TTL = 30 seconds.  Capacity-bounded with a simple LRU-style eviction.
 
+pub mod dragonfly_client;
+
 use std::{
     collections::HashMap,
     time::{Duration, Instant},
@@ -12,10 +14,16 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-//Config
-//max entries before eviction
+// Config.
+#[cfg(not(test))]
 const MAX_ENTRIES: usize = 10_000;
-const TTL: Duration = Duration::from_secs(30); //valid time
+#[cfg(test)]
+const MAX_ENTRIES: usize = 64;
+
+#[cfg(not(test))]
+const TTL: Duration = Duration::from_secs(30);
+#[cfg(test)]
+const TTL: Duration = Duration::from_millis(25);
 
 //cached decision
 
@@ -31,6 +39,7 @@ pub struct CachedDecision {
 struct Entry {
     decision: CachedDecision,
     inserted: Instant,
+    last_accessed: Instant,
     agent_id: Option<String>,
 }
 
@@ -92,18 +101,34 @@ impl DecisionCache {
     /// Returns the cached decision if it exists and has not expired.
     pub fn get(&self, key: &str) -> Option<CachedDecision> {
         let mut g = self.inner.lock();
-        let valid = g.map.get(key).map(|e| e.is_valid()).unwrap_or(false);
-        if valid {
-            g.hits += 1;
-            Some(g.map.get(key).unwrap().decision.clone())
-        } else {
-            g.misses += 1;
-            None
+        let mut hit: Option<CachedDecision> = None;
+        let mut expired = false;
+
+        if let Some(entry) = g.map.get_mut(key) {
+            if entry.is_valid() {
+                entry.last_accessed = Instant::now();
+                hit = Some(entry.decision.clone());
+            } else {
+                expired = true;
+            }
         }
+
+        if let Some(decision) = hit {
+            g.hits += 1;
+            return Some(decision);
+        }
+
+        if expired {
+            // Expired entries are removed eagerly on read.
+            g.map.remove(key);
+        }
+
+        g.misses += 1;
+        None
     }
 
-    /// Insert a decision.  Evicts expired entries (and oldest entries if at
-    /// capacity) before inserting.
+    /// Insert a decision. Evicts expired entries (and least-recently-used
+    /// entries if at capacity) before inserting.
     pub fn insert(&self, key: String, decision: CachedDecision) {
         self.insert_for(key, decision, None)
     }
@@ -118,6 +143,7 @@ impl DecisionCache {
             Entry {
                 decision,
                 inserted: Instant::now(),
+                last_accessed: Instant::now(),
                 agent_id: agent_id.map(String::from),
             },
         );
@@ -127,21 +153,12 @@ impl DecisionCache {
     /// breaker trips so stale ALLOW decisions can never leak through).
     pub fn invalidate_agent(&self, agent_id: &str) {
         let mut g = self.inner.lock();
-        // Retain only entries whose key was NOT produced for this agent.
-        // Cache keys are SHA-256 hashes, so we rebuild candidate keys across
-        // plausible action_types / buckets and remove matches.  For safety,
-        // fall back to full clear only if agent_id is empty.
         if agent_id.is_empty() {
             g.map.clear();
             return;
         }
-        g.map.retain(|_key, entry| {
-            // Keep entries that are not ALLOW for defensive correctness;
-            // also keep entries from other agents.  Because keys are hashes
-            // of (agent_id || ...) we cannot reverse them.  We mark entries
-            // with the originating agent_id at insert time (see Entry).
-            entry.agent_id.as_deref() != Some(agent_id)
-        });
+        g.map
+            .retain(|_key, entry| entry.agent_id.as_deref() != Some(agent_id));
     }
 
     pub fn stats(&self) -> CacheStats {
@@ -160,22 +177,20 @@ impl DecisionCache {
     }
 
     fn evict(g: &mut Inner) {
-        //remove expired entries first.
+        // Remove expired entries first.
         g.map.retain(|_, e| e.is_valid());
-        //if still at capacity, drop oldest 10 %.
+
+        // If still at capacity, remove true LRU entries by last access tick.
         if g.map.len() >= MAX_ENTRIES {
-            let remove_count = MAX_ENTRIES / 10;
-            let keys_to_remove: Vec<String> = g
+            let remove_count = (MAX_ENTRIES / 10).max(1);
+            let mut by_age: Vec<(String, Instant)> = g
                 .map
                 .iter()
-                .map(|(k, e)| (k.clone(), e.inserted))
-                .collect::<Vec<_>>()
-                .into_iter()
-                .take(remove_count)
-                .map(|(k, _)| k)
+                .map(|(k, e)| (k.clone(), e.last_accessed))
                 .collect();
-            for k in keys_to_remove {
-                g.map.remove(&k);
+            by_age.sort_by_key(|(_, accessed)| *accessed);
+            for (key, _) in by_age.into_iter().take(remove_count) {
+                g.map.remove(&key);
             }
         }
     }
@@ -221,9 +236,177 @@ mod tests {
     }
 
     #[test]
+    fn different_action_types_different_keys() {
+        let k1 = DecisionCache::make_key("a1", "transfer", 5, 0);
+        let k2 = DecisionCache::make_key("a1", "withdraw", 5, 0);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn different_agents_different_keys() {
+        let k1 = DecisionCache::make_key("agent-1", "transfer", 5, 0);
+        let k2 = DecisionCache::make_key("agent-2", "transfer", 5, 0);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
     fn key_stable() {
         let k1 = DecisionCache::make_key("bot", "transfer", 10, 2);
         let k2 = DecisionCache::make_key("bot", "transfer", 10, 2);
         assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn overwrite_existing_key_returns_latest_value() {
+        let c = DecisionCache::new();
+        let key = DecisionCache::make_key("agent-ow", "transfer", 5, 0);
+        c.insert(key.clone(), allow());
+        let deny = CachedDecision {
+            decision: "DENY".into(),
+            rate_limit: 0,
+            circuit_breaker_active: true,
+            reason: Some("overwritten".into()),
+            policy: None,
+        };
+        c.insert(key.clone(), deny);
+        let got = c.get(&key).expect("must hit");
+        assert_eq!(got.decision, "DENY");
+        assert!(got.circuit_breaker_active);
+    }
+
+    #[test]
+    fn empty_cache_stats_are_zero() {
+        let c = DecisionCache::new();
+        let s = c.stats();
+        assert_eq!(s.size, 0);
+        assert_eq!(s.hits, 0);
+        assert_eq!(s.misses, 0);
+        assert!((s.hit_rate - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn hit_rate_calculation_accuracy() {
+        let c = DecisionCache::new();
+        let key = DecisionCache::make_key("hr", "transfer", 1, 0);
+        c.insert(key.clone(), allow());
+        // 3 hits
+        for _ in 0..3 {
+            assert!(c.get(&key).is_some());
+        }
+        // 1 miss
+        assert!(c.get("nonexistent").is_none());
+        let s = c.stats();
+        assert_eq!(s.hits, 3);
+        assert_eq!(s.misses, 1);
+        assert!((s.hit_rate - 0.75).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn insert_for_tags_agent_and_invalidation_clears_only_that_agent() {
+        let c = DecisionCache::new();
+        let k1 = DecisionCache::make_key("a", "x", 0, 0);
+        let k2 = DecisionCache::make_key("b", "x", 0, 0);
+        let k3 = DecisionCache::make_key("a", "y", 1, 0);
+        c.insert_for(k1.clone(), allow(), Some("a"));
+        c.insert_for(k2.clone(), allow(), Some("b"));
+        c.insert_for(k3.clone(), allow(), Some("a"));
+
+        c.invalidate_agent("a");
+        assert!(c.get(&k1).is_none(), "agent-a entry should be gone");
+        assert!(c.get(&k3).is_none(), "agent-a second entry should be gone");
+        assert!(c.get(&k2).is_some(), "agent-b entry should survive");
+    }
+
+    #[test]
+    fn invalidate_empty_agent_id_clears_all() {
+        let c = DecisionCache::new();
+        for i in 0..5 {
+            let k = DecisionCache::make_key("agent", "t", i, 0);
+            c.insert_for(k, allow(), Some("agent"));
+        }
+        assert_eq!(c.stats().size, 5);
+        c.invalidate_agent("");
+        assert_eq!(c.stats().size, 0);
+    }
+
+    #[test]
+    fn concurrent_insert_and_get() {
+        use std::sync::Arc;
+        let c = Arc::new(DecisionCache::new());
+        let mut handles = Vec::new();
+        for t in 0..4 {
+            let cache = Arc::clone(&c);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..16 {
+                    let key = DecisionCache::make_key(&format!("t{t}"), "transfer", i, 0);
+                    cache.insert(
+                        key.clone(),
+                        CachedDecision {
+                            decision: "ALLOW".into(),
+                            rate_limit: 60,
+                            circuit_breaker_active: false,
+                            reason: None,
+                            policy: None,
+                        },
+                    );
+                    let _ = cache.get(&key);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread should not panic");
+        }
+        // All threads completed without deadlock or panic
+        assert!(c.stats().size <= MAX_ENTRIES);
+    }
+
+    #[test]
+    fn ttl_expiry_is_cleaned_on_read() {
+        let c = DecisionCache::new();
+        let key = DecisionCache::make_key("agent-ttl", "transfer", 5, 0);
+        c.insert(key.clone(), allow());
+
+        std::thread::sleep(TTL + Duration::from_millis(10));
+
+        assert!(c.get(&key).is_none());
+        let s = c.stats();
+        assert_eq!(s.size, 0);
+    }
+
+    #[test]
+    fn invalidate_agent_removes_only_target_agent_entries() {
+        let c = DecisionCache::new();
+        let k1 = DecisionCache::make_key("agent-a", "transfer", 1, 0);
+        let k2 = DecisionCache::make_key("agent-b", "transfer", 1, 0);
+
+        c.insert_for(k1.clone(), allow(), Some("agent-a"));
+        c.insert_for(k2.clone(), allow(), Some("agent-b"));
+
+        c.invalidate_agent("agent-a");
+
+        assert!(c.get(&k1).is_none());
+        assert!(c.get(&k2).is_some());
+    }
+
+    #[test]
+    fn evicts_least_recently_used_entry_when_over_capacity() {
+        let c = DecisionCache::new();
+
+        let protected_key = DecisionCache::make_key("agent-hot", "transfer", 0, 0);
+        c.insert(protected_key.clone(), allow());
+
+        for i in 1..MAX_ENTRIES {
+            let k = DecisionCache::make_key("agent-cold", "transfer", i as i64, 0);
+            c.insert(k, allow());
+        }
+
+        // Refresh recency right before the overflow insert triggers eviction.
+        assert!(c.get(&protected_key).is_some());
+
+        let overflow_key = DecisionCache::make_key("agent-overflow", "transfer", 9_999, 0);
+        c.insert(overflow_key, allow());
+
+        // The recently accessed key should survive an LRU eviction pass.
+        assert!(c.get(&protected_key).is_some());
     }
 }
