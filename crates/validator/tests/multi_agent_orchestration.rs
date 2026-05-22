@@ -4,7 +4,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use haltchain_consensus::{QuorumDecision, QuorumRequest, QuorumTracker, HIGH_STAKES_THRESHOLD_CENTS};
+use haltchain_consensus::{
+    HIGH_STAKES_THRESHOLD_CENTS, QuorumDecision, QuorumRequest, QuorumTracker,
+};
 use haltchain_validator::{ActionPayload, AppState, Decision, ValidationRequest};
 use serde_json::json;
 
@@ -14,7 +16,12 @@ fn make_req(agent_id: &str, action_type: &str, amount: f64) -> ValidationRequest
     make_req_with_recipient(agent_id, action_type, amount, "acct_target")
 }
 
-fn make_req_with_recipient(agent_id: &str, action_type: &str, amount: f64, recipient: &str) -> ValidationRequest {
+fn make_req_with_recipient(
+    agent_id: &str,
+    action_type: &str,
+    amount: f64,
+    recipient: &str,
+) -> ValidationRequest {
     ValidationRequest {
         agent_id: agent_id.into(),
         api_key: "test-key".into(),
@@ -27,6 +34,8 @@ fn make_req_with_recipient(agent_id: &str, action_type: &str, amount: f64, recip
             method: Some("POST".into()),
             device_id: None,
             command: None,
+            delegation_depth: None,
+            data_source: Default::default(),
         },
         session_id: Some(format!("sess_{agent_id}")),
         metadata: json!({
@@ -79,7 +88,9 @@ async fn test_cascading_failure_containment() {
             let mut allows = 0usize;
             let recipient = format!("acct_{id}");
             for _ in 0..10 {
-                let resp = state.validate(&make_req_with_recipient(&id, "transfer", 50.0, &recipient)).await;
+                let resp = state
+                    .validate(&make_req_with_recipient(&id, "transfer", 50.0, &recipient))
+                    .await;
                 if matches!(resp.decision, Decision::Allow) {
                     allows += 1;
                 }
@@ -95,8 +106,16 @@ async fn test_cascading_failure_containment() {
         }
     }
 
-    let rogue_denials = results.iter().find(|r| r.0 == "rogue").map(|r| r.1).unwrap_or(0);
-    let honest_allows: Vec<usize> = results.iter().filter(|r| r.0 == "honest").map(|r| r.1).collect();
+    let rogue_denials = results
+        .iter()
+        .find(|r| r.0 == "rogue")
+        .map(|r| r.1)
+        .unwrap_or(0);
+    let honest_allows: Vec<usize> = results
+        .iter()
+        .filter(|r| r.0 == "honest")
+        .map(|r| r.1)
+        .collect();
 
     // Rogue must have been denied on at least the over-limit requests.
     assert!(
@@ -130,7 +149,7 @@ fn test_quorum_honest_majority_wins() {
     let mut tracker = QuorumTracker::new(&req.transaction_id);
     tracker.approve(1); // honest node A
     tracker.approve(2); // honest node B
-    tracker.reject(3);  // malicious market-maker
+    tracker.reject(3); // malicious market-maker
 
     assert_eq!(
         tracker.decision(),
@@ -224,7 +243,9 @@ async fn test_velocity_windows_are_agent_scoped() {
         tokio::spawn(async move {
             let mut denials = 0usize;
             for _ in 0..50 {
-                let resp = state.validate(&make_req("burst_agent", "transfer", 100.0)).await;
+                let resp = state
+                    .validate(&make_req("burst_agent", "transfer", 100.0))
+                    .await;
                 if matches!(resp.decision, Decision::Deny | Decision::CircuitBreak) {
                     denials += 1;
                 }
@@ -239,7 +260,14 @@ async fn test_velocity_windows_are_agent_scoped() {
         tokio::spawn(async move {
             let mut allows = 0usize;
             for _ in 0..5 {
-                let resp = state.validate(&make_req_with_recipient("normal_agent", "transfer", 100.0, "acct_normal")).await;
+                let resp = state
+                    .validate(&make_req_with_recipient(
+                        "normal_agent",
+                        "transfer",
+                        100.0,
+                        "acct_normal",
+                    ))
+                    .await;
                 if matches!(resp.decision, Decision::Allow) {
                     allows += 1;
                 }
@@ -252,10 +280,7 @@ async fn test_velocity_windows_are_agent_scoped() {
     let burst_denials = burst_denials.unwrap();
     let normal_allows = normal_allows.unwrap();
 
-    assert!(
-        burst_denials > 0,
-        "burst agent must have been rate-limited"
-    );
+    assert!(burst_denials > 0, "burst agent must have been rate-limited");
     assert_eq!(
         normal_allows, 5,
         "normal agent must not be affected by burst agent's violations (got {normal_allows}/5 allows)"
@@ -302,7 +327,9 @@ async fn test_concurrent_p99_latency_under_10ms() {
 
     // Warm up.
     for i in 0..10 {
-        state.validate(&make_req(&format!("warmup_{i}"), "api_call", 0.0)).await;
+        state
+            .validate(&make_req(&format!("warmup_{i}"), "api_call", 0.0))
+            .await;
     }
 
     let handles: Vec<_> = (0..100)

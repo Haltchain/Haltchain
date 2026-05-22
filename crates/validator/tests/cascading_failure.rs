@@ -31,6 +31,8 @@ fn normal_req(agent_id: &str) -> ValidationRequest {
             method: Some("GET".into()),
             device_id: None,
             command: None,
+            delegation_depth: None,
+            data_source: Default::default(),
         },
         session_id: Some(format!("sess_{agent_id}")),
         metadata: json!({
@@ -58,6 +60,8 @@ fn oversized_transfer_req(agent_id: &str) -> ValidationRequest {
             method: Some("POST".into()),
             device_id: None,
             command: None,
+            delegation_depth: None,
+            data_source: Default::default(),
         },
         session_id: Some(format!("sess_attack_{agent_id}")),
         metadata: json!({
@@ -85,6 +89,8 @@ fn resource_exhaust_req(agent_id: &str) -> ValidationRequest {
             method: Some("POST".into()),
             device_id: None,
             command: None,
+            delegation_depth: None,
+            data_source: Default::default(),
         },
         session_id: Some(format!("sess_exhaust_{agent_id}")),
         metadata: json!({
@@ -112,6 +118,8 @@ fn pii_exfiltration_req(agent_id: &str) -> ValidationRequest {
             method: Some("POST".into()),
             device_id: None,
             command: None,
+            delegation_depth: None,
+            data_source: Default::default(),
         },
         session_id: Some(format!("sess_pii_{agent_id}")),
         metadata: json!({
@@ -191,7 +199,9 @@ async fn multi_vector_concurrent_attack_contained() {
             tokio::spawn(async move {
                 let mut denied = 0usize;
                 for _ in 0..n_attacks_per_rogue {
-                    let resp = state.validate(&oversized_transfer_req("attacker_financial")).await;
+                    let resp = state
+                        .validate(&oversized_transfer_req("attacker_financial"))
+                        .await;
                     if !matches!(resp.decision, Decision::Allow) {
                         denied += 1;
                     }
@@ -205,7 +215,9 @@ async fn multi_vector_concurrent_attack_contained() {
             tokio::spawn(async move {
                 let mut denied = 0usize;
                 for _ in 0..n_attacks_per_rogue {
-                    let resp = state.validate(&resource_exhaust_req("attacker_resource")).await;
+                    let resp = state
+                        .validate(&resource_exhaust_req("attacker_resource"))
+                        .await;
                     if !matches!(resp.decision, Decision::Allow) {
                         denied += 1;
                     }
@@ -281,7 +293,9 @@ async fn system_recovers_after_attack_storm() {
         let state = Arc::clone(&state);
         handles.push(tokio::spawn(async move {
             for _ in 0..100 {
-                state.validate(&oversized_transfer_req(&format!("storm_rogue_{r}"))).await;
+                state
+                    .validate(&oversized_transfer_req(&format!("storm_rogue_{r}")))
+                    .await;
             }
         }));
     }
@@ -372,8 +386,14 @@ async fn swarm_200_agents_10pct_rogue_contained() {
     let rogue_containment = rogue_denied_total as f64 / rogue_total as f64;
     let healthy_success = healthy_allowed_total as f64 / healthy_total as f64;
 
-    println!("Rogue containment:  {rogue_denied_total}/{rogue_total} ({:.0}%)", rogue_containment * 100.0);
-    println!("Healthy success:    {healthy_allowed_total}/{healthy_total} ({:.0}%)", healthy_success * 100.0);
+    println!(
+        "Rogue containment:  {rogue_denied_total}/{rogue_total} ({:.0}%)",
+        rogue_containment * 100.0
+    );
+    println!(
+        "Healthy success:    {healthy_allowed_total}/{healthy_total} ({:.0}%)",
+        healthy_success * 100.0
+    );
 
     // All rogue requests must be denied.
     assert_eq!(
@@ -412,6 +432,7 @@ async fn no_panics_under_mixed_concurrent_traffic() {
         .collect();
 
     for h in handles {
-        h.await.expect("task panicked under concurrent mixed traffic");
+        h.await
+            .expect("task panicked under concurrent mixed traffic");
     }
 }

@@ -1,7 +1,6 @@
 //! Algorithm torture tests — verify correctness of core detection algorithms
 //! under adversarial inputs, edge cases, and statistical stress.
 
-
 use haltchain_analytics::{
     Ewma, SlidingWindowTracker,
     isolation_forest::{ANOMALY_THRESHOLD, IsolationForest},
@@ -94,10 +93,7 @@ fn isolation_forest_low_false_positive_rate() {
     // Score 1000 in-distribution points — FPR must stay below 5%.
     let fp_count = (0..1_000)
         .filter(|i| {
-            let pt = vec![
-                40.0 + (i % 30) as f64,
-                80.0 + (i % 50) as f64,
-            ];
+            let pt = vec![40.0 + (i % 30) as f64, 80.0 + (i % 50) as f64];
             forest.is_anomaly(&pt)
         })
         .count();
@@ -125,7 +121,7 @@ fn isolation_forest_anomaly_detected_quickly() {
     );
 }
 
-//Cosine similarity / goal-drift FPR 
+//Cosine similarity / goal-drift FPR
 
 /// Helper: hash-projection embed (mirrors LocalModel, no dependency needed).
 fn embed(text: &str, dims: usize) -> Vec<f64> {
@@ -158,8 +154,14 @@ fn goal_drift_identical_text_has_perfect_similarity() {
 
 #[test]
 fn goal_drift_low_similarity_for_malicious_action() {
-    let goal = embed("Execute trades within stated risk limits for client portfolio", 64);
-    let action = embed("Transfer all balances to offshore account and delete logs", 64);
+    let goal = embed(
+        "Execute trades within stated risk limits for client portfolio",
+        64,
+    );
+    let action = embed(
+        "Transfer all balances to offshore account and delete logs",
+        64,
+    );
     let score = cosine_similarity(&goal, &action);
     // A proper drift signal — must be meaningfully below aligned threshold.
     assert!(
@@ -181,7 +183,7 @@ fn goal_drift_different_text_has_lower_similarity() {
     );
 }
 
-//Circuit-breaker / AggregateBreaker 
+//Circuit-breaker / AggregateBreaker
 
 #[test]
 fn financial_breaker_denies_over_limit() {
@@ -248,7 +250,7 @@ fn aggregate_breaker_does_not_flap_on_repeated_evaluation() {
     assert!(all_deny, "AggregateBreaker flapped — inconsistent denials");
 }
 
-//SlidingWindowTracker 
+//SlidingWindowTracker
 
 #[test]
 fn sliding_window_velocity_increases_under_flood() {

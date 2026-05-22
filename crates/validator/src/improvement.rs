@@ -155,8 +155,16 @@ impl SandboxTestGate {
     /// Old version would flag this anomaly score → new version must also flag it.
     fn test_anomaly_threshold(idx: usize, old: &AgentVersion, new: &AgentVersion) -> bool {
         let score = case_score(idx, 0.5, 1.0);
-        let old_t = old.threshold_snapshot.get("anomaly_threshold").copied().unwrap_or(0.7);
-        let new_t = new.threshold_snapshot.get("anomaly_threshold").copied().unwrap_or(0.7);
+        let old_t = old
+            .threshold_snapshot
+            .get("anomaly_threshold")
+            .copied()
+            .unwrap_or(0.7);
+        let new_t = new
+            .threshold_snapshot
+            .get("anomaly_threshold")
+            .copied()
+            .unwrap_or(0.7);
         let old_flags = score > old_t;
         let new_flags = score > new_t;
         !old_flags || new_flags
@@ -167,8 +175,16 @@ impl SandboxTestGate {
         let multiplier = case_score(idx, 1.0, 2.5);
         let base = 60.0f64;
         let sim_rate = base * multiplier;
-        let old_limit = old.threshold_snapshot.get("rate_limit").copied().unwrap_or(60.0);
-        let new_limit = new.threshold_snapshot.get("rate_limit").copied().unwrap_or(60.0);
+        let old_limit = old
+            .threshold_snapshot
+            .get("rate_limit")
+            .copied()
+            .unwrap_or(60.0);
+        let new_limit = new
+            .threshold_snapshot
+            .get("rate_limit")
+            .copied()
+            .unwrap_or(60.0);
         let old_trips = sim_rate > old_limit;
         let new_trips = sim_rate > new_limit;
         !old_trips || new_trips
@@ -196,8 +212,16 @@ impl SandboxTestGate {
     /// Amount-based threshold must not weaken.
     fn test_amount_threshold(idx: usize, old: &AgentVersion, new: &AgentVersion) -> bool {
         let amount = case_score(idx, 400.0, 2000.0);
-        let old_limit = old.threshold_snapshot.get("amount_threshold").copied().unwrap_or(500.0);
-        let new_limit = new.threshold_snapshot.get("amount_threshold").copied().unwrap_or(500.0);
+        let old_limit = old
+            .threshold_snapshot
+            .get("amount_threshold")
+            .copied()
+            .unwrap_or(500.0);
+        let new_limit = new
+            .threshold_snapshot
+            .get("amount_threshold")
+            .copied()
+            .unwrap_or(500.0);
         let old_blocks = amount > old_limit;
         let new_blocks = amount > new_limit;
         !old_blocks || new_blocks
@@ -418,7 +442,11 @@ impl RecursiveAgentValidator {
 
         let embedding_shift = diff.goal_cosine_shift.map(|sim| 1.0 - sim).unwrap_or(0.0);
         let threshold_shift = diff.max_threshold_relative_delta().min(1.0);
-        let model_shift = if diff.anomaly_model_replaced { 0.1 } else { 0.0 };
+        let model_shift = if diff.anomaly_model_replaced {
+            0.1
+        } else {
+            0.0
+        };
         let total_shift =
             (embedding_shift * 0.6 + threshold_shift * 0.3 + model_shift).clamp(0.0, 1.0);
 
@@ -582,9 +610,12 @@ mod tests {
     fn adversarial_gate_fails_when_anomaly_threshold_raised() {
         // New version raises anomaly_threshold from 0.5 to 0.99 — many attacks go undetected.
         let mut old = make_version("a1", 1, "transfer payments", vec![1.0, 0.0]);
-        old.threshold_snapshot.insert("anomaly_threshold".to_string(), 0.5);
+        old.threshold_snapshot
+            .insert("anomaly_threshold".to_string(), 0.5);
         let mut new_v = make_version("a1", 2, "transfer payments", vec![1.0, 0.0]);
-        new_v.threshold_snapshot.insert("anomaly_threshold".to_string(), 0.99);
+        new_v
+            .threshold_snapshot
+            .insert("anomaly_threshold".to_string(), 0.99);
         let result = SandboxTestGate::run(&old, &new_v);
         assert!(!result.gate_passed, "weakened threshold must fail the gate");
     }
@@ -592,11 +623,17 @@ mod tests {
     #[test]
     fn adversarial_gate_fails_when_rate_limit_raised() {
         let mut old = make_version("a1", 1, "transfer payments", vec![1.0, 0.0]);
-        old.threshold_snapshot.insert("rate_limit".to_string(), 60.0);
+        old.threshold_snapshot
+            .insert("rate_limit".to_string(), 60.0);
         let mut new_v = make_version("a1", 2, "transfer payments", vec![1.0, 0.0]);
-        new_v.threshold_snapshot.insert("rate_limit".to_string(), 10_000.0);
+        new_v
+            .threshold_snapshot
+            .insert("rate_limit".to_string(), 10_000.0);
         let result = SandboxTestGate::run(&old, &new_v);
-        assert!(!result.gate_passed, "weakened rate limit must fail the gate");
+        assert!(
+            !result.gate_passed,
+            "weakened rate limit must fail the gate"
+        );
     }
 
     #[test]

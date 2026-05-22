@@ -5,10 +5,15 @@ use haltchain_analytics::{
     SlidingWindowTracker, features,
     isolation_forest::{ANOMALY_THRESHOLD, AnomalyResult, IsolationForest},
 };
-use haltchain_embeddings::{EmbedPipeline, ModelKind};
+use haltchain_embeddings::{EmbedPipeline, ModelKind, select_local_embedding_kind};
 
 pub(crate) const DEFAULT_MAX_EWMA_VELOCITY: f64 = 600.0;
 pub(crate) const DEFAULT_MAX_RECIPIENT_TOTAL_PER_MINUTE: f64 = 1000.0;
+
+/// Maximum benign embedding history per agent (mirrors MIN_CALIBRATION_SAMPLES * 3).
+pub(crate) const MAX_AGENT_BENIGN_EMBEDDINGS: usize = 300;
+/// Minimum samples before per-agent K Core-Distance calibration kicks in.
+pub(crate) const MIN_AGENT_CALIBRATION_SAMPLES: usize = 100;
 
 /// Per-agent mutable runtime state.
 pub(crate) struct AgentState {
@@ -24,6 +29,11 @@ pub(crate) struct AgentState {
     pub samples_since_retrain: usize,
     pub prev_velocity_1m: f64,
     pub last_anomaly_score: Option<f64>,
+    /// Per-agent benign reference embeddings for K Core-Distance calibration.
+    /// Accumulates embeddings from allowed reasoning traces. Once at least
+    /// `MIN_AGENT_CALIBRATION_SAMPLES` are present, the global shared
+    /// calibration is replaced with this agent-specific baseline.
+    pub benign_embeddings: Vec<Vec<f64>>,
 }
 
 pub(crate) struct AnomalyRetrainPlan {
@@ -46,6 +56,26 @@ impl AgentState {
             samples_since_retrain: 0,
             prev_velocity_1m: 0.0,
             last_anomaly_score: None,
+            benign_embeddings: Vec::new(),
+        }
+    }
+
+    /// Record a benign reasoning trace embedding for per-agent K Core-Distance calibration.
+    /// Called after an action is ALLOWED. Keeps at most `MAX_AGENT_BENIGN_EMBEDDINGS` entries.
+    pub fn add_benign_embedding(&mut self, embedding: Vec<f64>) {
+        if self.benign_embeddings.len() >= MAX_AGENT_BENIGN_EMBEDDINGS {
+            self.benign_embeddings.remove(0);
+        }
+        self.benign_embeddings.push(embedding);
+    }
+
+    /// Returns a slice of per-agent benign reference embeddings, or an empty
+    /// slice when insufficient samples are available (falls back to global calibration).
+    pub fn calibration_refs(&self) -> &[Vec<f64>] {
+        if self.benign_embeddings.len() >= MIN_AGENT_CALIBRATION_SAMPLES {
+            self.benign_embeddings.as_slice()
+        } else {
+            &[]
         }
     }
 
@@ -98,8 +128,7 @@ impl AgentState {
 
         let recipient_refs: Vec<&str> = self.recent_recipients.iter().map(String::as_str).collect();
         let amounts_slice = self.recent_amounts.make_contiguous();
-        let feature =
-            features::extract(amounts_slice, &recipient_refs, self.prev_velocity_1m);
+        let feature = features::extract(amounts_slice, &recipient_refs, self.prev_velocity_1m);
         self.prev_velocity_1m = feature.velocity_1m;
 
         let point = vec![
@@ -206,7 +235,7 @@ pub(crate) fn build_embed_pipeline() -> EmbedPipeline {
         tracing::info!(url = %url, model = %model_name, dims, "using remote embedding model");
         EmbedPipeline::new(ModelKind::remote(url, model_name, api_key, dims))
     } else {
-        tracing::warn!("EMBEDDING_URL not set; using LocalModel fallback with lexical heuristics");
-        EmbedPipeline::new(ModelKind::local_or_hash())
+        tracing::info!("local embedding path: HALTCHAIN_EMBEDDING_TIER + ONNX dir (see Roadmap D)");
+        EmbedPipeline::new(select_local_embedding_kind())
     }
 }

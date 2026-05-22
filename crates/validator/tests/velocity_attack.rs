@@ -13,14 +13,11 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use haltchain_analytics::{
-    Ewma, SlidingWindowTracker,
-    isolation_forest::IsolationForest,
-};
+use haltchain_analytics::{Ewma, SlidingWindowTracker, isolation_forest::IsolationForest};
 use haltchain_validator::{ActionPayload, AppState, Decision, ValidationRequest};
 use serde_json::json;
 
-//Helpers 
+//Helpers
 
 fn make_transfer(agent: &str, amount: f64, session: &str) -> ValidationRequest {
     ValidationRequest {
@@ -35,6 +32,8 @@ fn make_transfer(agent: &str, amount: f64, session: &str) -> ValidationRequest {
             method: Some("POST".into()),
             device_id: None,
             command: None,
+            delegation_depth: None,
+            data_source: Default::default(),
         },
         session_id: Some(session.into()),
         metadata: json!({
@@ -49,7 +48,7 @@ fn make_transfer(agent: &str, amount: f64, session: &str) -> ValidationRequest {
     }
 }
 
-//EWMA spike detection unit test 
+//EWMA spike detection unit test
 
 #[test]
 fn ewma_detects_velocity_spike_within_5_observations() {
@@ -84,7 +83,7 @@ fn ewma_detects_velocity_spike_within_5_observations() {
     );
 }
 
-// IsolationForest flags burst vectors 
+// IsolationForest flags burst vectors
 
 #[test]
 fn isolation_forest_flags_velocity_burst_vectors() {
@@ -94,9 +93,9 @@ fn isolation_forest_flags_velocity_burst_vectors() {
         .map(|i| {
             let fi = i as f64;
             vec![
-                5.0 + (fi * 0.37) % 10.0,        // velocity in [5, 15)
-                100.0 + (fi * 0.73) % 50.0,       // amount in [100, 150)
-                0.1 + (fi * 0.017) % 0.1,         // acceleration in [0.1, 0.2)
+                5.0 + (fi * 0.37) % 10.0,   // velocity in [5, 15)
+                100.0 + (fi * 0.73) % 50.0, // amount in [100, 150)
+                0.1 + (fi * 0.017) % 0.1,   // acceleration in [0.1, 0.2)
             ]
         })
         .collect();
@@ -106,9 +105,9 @@ fn isolation_forest_flags_velocity_burst_vectors() {
     let attack_flagged = (0..100)
         .filter(|i| {
             let attack = vec![
-                10_000.0 + *i as f64,  // extreme velocity
-                999_999.0,              // extreme amount
-                500.0,                  // extreme acceleration
+                10_000.0 + *i as f64, // extreme velocity
+                999_999.0,            // extreme amount
+                500.0,                // extreme acceleration
             ];
             forest.is_anomaly(&attack)
         })
@@ -200,6 +199,8 @@ async fn full_stack_velocity_attack_contained() {
             method: Some("POST".into()),
             device_id: None,
             command: None,
+            delegation_depth: None,
+            data_source: Default::default(),
         },
         session_id: Some("sess_legit_2".into()),
         metadata: json!({
@@ -216,11 +217,12 @@ async fn full_stack_velocity_attack_contained() {
     assert!(
         matches!(post_attack_resp.decision, Decision::Allow),
         "Fresh legit trader blocked after rogue attack — cascading failure: {:?} reason={:?}",
-        post_attack_resp.decision, post_attack_resp.reason
+        post_attack_resp.decision,
+        post_attack_resp.reason
     );
 }
 
-//Concurrent rogue + legitimate traffic 
+//Concurrent rogue + legitimate traffic
 
 #[tokio::test]
 async fn concurrent_velocity_attack_no_cascade() {
@@ -248,6 +250,8 @@ async fn concurrent_velocity_attack_no_cascade() {
                         method: Some("POST".into()),
                         device_id: None,
                         command: None,
+                        delegation_depth: None,
+                        data_source: Default::default(),
                     },
                     session_id: Some(format!("sess_{i:03}")),
                     metadata: json!({

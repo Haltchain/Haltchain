@@ -4,17 +4,14 @@
 //! that real-world attackers would exploit. Every test is designed to **find**
 //! the edge, not merely confirm the happy path.
 
-use haltchain_analytics::{
-    Ewma, SlidingWindowTracker,
-    isolation_forest::IsolationForest,
-};
+use haltchain_analytics::{Ewma, SlidingWindowTracker, isolation_forest::IsolationForest};
 use haltchain_embeddings::cosine_similarity;
 use haltchain_policy::{
-    ActionContext, AggregateBreaker, CircuitBreaker, FinancialBreaker, MAX_TRANSFER_USD,
-    PolicyResult, AggregateMode,
+    ActionContext, AggregateBreaker, AggregateMode, CircuitBreaker, FinancialBreaker,
+    MAX_TRANSFER_USD, PolicyResult,
 };
 
-//EWMA Numeric Limits 
+//EWMA Numeric Limits
 
 #[test]
 fn ewma_zero_alpha_ignores_updates() {
@@ -58,7 +55,10 @@ fn ewma_handles_nan_input_without_corruption() {
         // In production, callers must guard against NaN inputs.
     } else {
         // If implementation guards against NaN, value should stay finite.
-        assert!(after.is_finite(), "EWMA post-NaN should be finite or NaN, got {after}");
+        assert!(
+            after.is_finite(),
+            "EWMA post-NaN should be finite or NaN, got {after}"
+        );
     }
     _ = before; // suppress unused warning
 }
@@ -107,7 +107,7 @@ fn ewma_alternating_extreme_values() {
     );
 }
 
-// Cosine Similarity Limits 
+// Cosine Similarity Limits
 // NOTE: cosine_similarity() is actually a raw dot product (no magnitude
 // normalization). These tests document that limitation.
 
@@ -221,8 +221,12 @@ fn cosine_mixed_nan_does_not_panic() {
 fn cosine_high_dimensional_dot_not_bounded() {
     // BUG DOCUMENTATION: raw dot product is NOT bounded to [-1,1] for non-unit vectors.
     let dim = 768;
-    let v1: Vec<f64> = (0..dim).map(|i| ((i * 17 + 3) % 97) as f64 / 50.0 - 1.0).collect();
-    let v2: Vec<f64> = (0..dim).map(|i| ((i * 31 + 7) % 89) as f64 / 45.0 - 1.0).collect();
+    let v1: Vec<f64> = (0..dim)
+        .map(|i| ((i * 17 + 3) % 97) as f64 / 50.0 - 1.0)
+        .collect();
+    let v2: Vec<f64> = (0..dim)
+        .map(|i| ((i * 31 + 7) % 89) as f64 / 45.0 - 1.0)
+        .collect();
     let sim = cosine_similarity(&v1, &v2);
     // Must not panic; the value is a raw dot product (can be any real number).
     assert!(
@@ -239,7 +243,10 @@ fn isolation_forest_single_point_dataset() {
     let forest = IsolationForest::fit(&data);
     let score = forest.score(&[1.0, 1.0]);
     // With only one point, every query is that point. Score must be finite.
-    assert!(score.is_finite(), "Single-point forest score must be finite, got {score}");
+    assert!(
+        score.is_finite(),
+        "Single-point forest score must be finite, got {score}"
+    );
 }
 
 #[test]
@@ -249,7 +256,10 @@ fn isolation_forest_all_identical_points() {
     let forest = IsolationForest::fit(&data);
     // The identical point should not be anomalous.
     let score = forest.score(&[42.0, 42.0]);
-    assert!(score.is_finite(), "Identical-point forest score must be finite, got {score}");
+    assert!(
+        score.is_finite(),
+        "Identical-point forest score must be finite, got {score}"
+    );
     // A different point should be more anomalous.
     let outlier_score = forest.score(&[9999.0, 9999.0]);
     assert!(
@@ -307,7 +317,12 @@ fn financial_breaker_trait_evaluate_at_limit() {
     };
     // At-limit should pass (only exceeding triggers deny).
     let result = breaker.evaluate(&ctx);
-    assert_eq!(result, PolicyResult::Pass, "At-limit should pass, got {:?}", result);
+    assert_eq!(
+        result,
+        PolicyResult::Pass,
+        "At-limit should pass, got {:?}",
+        result
+    );
 }
 
 #[test]
@@ -320,7 +335,8 @@ fn financial_breaker_trait_evaluate_just_over() {
     let result = breaker.evaluate(&ctx);
     assert!(
         matches!(result, PolicyResult::Deny { .. }),
-        "One-cent-over must deny, got {:?}", result
+        "One-cent-over must deny, got {:?}",
+        result
     );
 }
 
@@ -352,7 +368,12 @@ fn financial_breaker_negative_amount_passes() {
     };
     // Negative amounts are not > MAX_TRANSFER_USD, so should pass.
     let result = breaker.evaluate(&ctx);
-    assert_eq!(result, PolicyResult::Pass, "Negative amount should pass, got {:?}", result);
+    assert_eq!(
+        result,
+        PolicyResult::Pass,
+        "Negative amount should pass, got {:?}",
+        result
+    );
 }
 
 #[test]
@@ -369,7 +390,8 @@ fn aggregate_breaker_any_mode_single_deny() {
     let result = ab.evaluate(&ctx);
     assert!(
         matches!(result, PolicyResult::Deny { .. }),
-        "AggregateBreaker(Any) should deny when one sub-breaker denies, got {:?}", result
+        "AggregateBreaker(Any) should deny when one sub-breaker denies, got {:?}",
+        result
     );
 }
 
@@ -385,7 +407,11 @@ fn aggregate_breaker_all_mode_one_pass_allows() {
         ..Default::default()
     };
     let result = ab.evaluate(&ctx);
-    assert_eq!(result, PolicyResult::Pass, "All-mode with passing sub-breaker should pass");
+    assert_eq!(
+        result,
+        PolicyResult::Pass,
+        "All-mode with passing sub-breaker should pass"
+    );
 }
 
 // ─── Sliding Window Tracker Edge Cases ─────────────────────────────────────────
@@ -419,5 +445,9 @@ fn sliding_window_many_entries() {
     let stats = sw.stats_1m();
     // All recorded within 1 second, so all should be in the 1-min window.
     assert_eq!(stats.count, 1000, "All 1000 entries should be in window");
-    assert!((stats.mean - 499.5).abs() < 1.0, "Mean should be ~499.5, got {}", stats.mean);
+    assert!(
+        (stats.mean - 499.5).abs() < 1.0,
+        "Mean should be ~499.5, got {}",
+        stats.mean
+    );
 }
