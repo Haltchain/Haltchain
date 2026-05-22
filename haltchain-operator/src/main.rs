@@ -1,8 +1,8 @@
 use anyhow::Result;
 use tracing::info;
 
-mod crd;
 mod controllers;
+mod crd;
 mod webhook;
 
 use kube::Client;

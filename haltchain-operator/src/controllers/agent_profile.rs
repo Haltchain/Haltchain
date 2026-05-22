@@ -9,13 +9,13 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
+    Resource, ResourceExt,
     api::{Api, ListParams, Patch, PatchParams},
     client::Client,
     runtime::{
         controller::{Action, Controller},
         watcher::Config as WatcherConfig,
     },
-    Resource, ResourceExt,
 };
 use serde_json::json;
 use tracing::{error, info};
@@ -52,8 +52,7 @@ async fn reconcile(profile: Arc<AgentProfile>, ctx: Arc<Ctx>) -> Result<Action, 
 
     // Find all pods in this namespace that reference this AgentProfile.
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
-    let lp = ListParams::default()
-        .labels(&format!("haltchain.io/agent-profile={}", name));
+    let lp = ListParams::default().labels(&format!("haltchain.io/agent-profile={}", name));
     let pod_list = pods.list(&lp).await?;
 
     let mut injected = 0;

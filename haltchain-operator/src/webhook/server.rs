@@ -6,8 +6,8 @@
 
 use std::net::SocketAddr;
 
-use axum::{routing::post, Router};
 use anyhow::Result;
+use axum::{Router, routing::post};
 use tower::Service;
 use tracing::info;
 
@@ -54,13 +54,15 @@ pub async fn run() -> Result<()> {
             match acceptor.accept(stream).await {
                 Ok(tls_stream) => {
                     let io = hyper_util::rt::TokioIo::new(tls_stream);
-                    let hyper_svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
-                        let mut app = svc.clone();
-                        async move {
-                            let req = req.map(axum::body::Body::new);
-                            app.call(req).await
-                        }
-                    });
+                    let hyper_svc = hyper::service::service_fn(
+                        move |req: hyper::Request<hyper::body::Incoming>| {
+                            let mut app = svc.clone();
+                            async move {
+                                let req = req.map(axum::body::Body::new);
+                                app.call(req).await
+                            }
+                        },
+                    );
                     if let Err(e) = hyper::server::conn::http1::Builder::new()
                         .serve_connection(io, hyper_svc)
                         .await
@@ -73,4 +75,3 @@ pub async fn run() -> Result<()> {
         });
     }
 }
-

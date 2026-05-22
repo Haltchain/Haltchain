@@ -8,13 +8,13 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::{ConfigMap, Pod};
 use kube::{
+    Resource, ResourceExt,
     api::{Api, ListParams, Patch, PatchParams},
     client::Client,
     runtime::{
         controller::{Action, Controller},
         watcher::Config as WatcherConfig,
     },
-    Resource, ResourceExt,
 };
 use serde_json::json;
 use tracing::{error, info, warn};
@@ -44,7 +44,9 @@ pub async fn run(client: Client) -> Result<()> {
 }
 
 async fn reconcile(policy_set: Arc<PolicySet>, ctx: Arc<Ctx>) -> Result<Action, kube::Error> {
-    let ns = policy_set.namespace().unwrap_or_else(|| "default".to_string());
+    let ns = policy_set
+        .namespace()
+        .unwrap_or_else(|| "default".to_string());
     let name = policy_set.name_any();
 
     info!(namespace = %ns, name = %name, "Reconciling PolicySet");
@@ -62,7 +64,14 @@ async fn reconcile(policy_set: Arc<PolicySet>, ctx: Arc<Ctx>) -> Result<Action, 
                 .unwrap_or_default(),
             Err(e) => {
                 warn!(name = %cmr.name, "Cannot fetch ConfigMap: {e}");
-                patch_status(&ctx.client, &ns, &name, "Failed", &format!("ConfigMap error: {e}")).await?;
+                patch_status(
+                    &ctx.client,
+                    &ns,
+                    &name,
+                    "Failed",
+                    &format!("ConfigMap error: {e}"),
+                )
+                .await?;
                 return Ok(Action::requeue(Duration::from_secs(30)));
             }
         }
@@ -78,8 +87,7 @@ async fn reconcile(policy_set: Arc<PolicySet>, ctx: Arc<Ctx>) -> Result<Action, 
     // Hot-reload: send SIGHUP-equivalent to every sidecar pod in the namespace
     // that carries the label haltchain.io/policy-set=<name>.
     let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
-    let lp = ListParams::default()
-        .labels(&format!("haltchain.io/policy-set={}", name));
+    let lp = ListParams::default().labels(&format!("haltchain.io/policy-set={}", name));
     let pod_list = pods.list(&lp).await?;
     let sidecar_count = pod_list.items.len() as i32;
 
@@ -116,7 +124,10 @@ async fn reconcile(policy_set: Arc<PolicySet>, ctx: Arc<Ctx>) -> Result<Action, 
         &ns,
         &name,
         "Active",
-        &format!("Rules version {} active on {} sidecar(s)", policy_set.spec.version, sidecar_count),
+        &format!(
+            "Rules version {} active on {} sidecar(s)",
+            policy_set.spec.version, sidecar_count
+        ),
         sidecar_count,
     )
     .await?;

@@ -8,13 +8,13 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::{
+    Resource, ResourceExt,
     api::{Api, ObjectMeta, Patch, PatchParams},
     client::Client,
     runtime::{
         controller::{Action, Controller},
         watcher::Config as WatcherConfig,
     },
-    Resource, ResourceExt,
 };
 use serde_json::json;
 use tracing::{error, info, warn};
@@ -52,18 +52,42 @@ async fn reconcile(sink: Arc<AuditSink>, ctx: Arc<Ctx>) -> Result<Action, kube::
     // Validate sink type
     match sink.spec.sink_type.as_str() {
         "webhook" if sink.spec.webhook.is_none() => {
-            warn!("AuditSink {} has sink_type=webhook but no webhook config", name);
-            patch_status(&ctx.client, &ns, &name, "Failed", "webhook config required for sink_type=webhook").await?;
+            warn!(
+                "AuditSink {} has sink_type=webhook but no webhook config",
+                name
+            );
+            patch_status(
+                &ctx.client,
+                &ns,
+                &name,
+                "Failed",
+                "webhook config required for sink_type=webhook",
+            )
+            .await?;
             return Ok(Action::requeue(Duration::from_secs(60)));
         }
         "kafka" if sink.spec.kafka.is_none() => {
             warn!("AuditSink {} has sink_type=kafka but no kafka config", name);
-            patch_status(&ctx.client, &ns, &name, "Failed", "kafka config required for sink_type=kafka").await?;
+            patch_status(
+                &ctx.client,
+                &ns,
+                &name,
+                "Failed",
+                "kafka config required for sink_type=kafka",
+            )
+            .await?;
             return Ok(Action::requeue(Duration::from_secs(60)));
         }
         "webhook" | "kafka" | "stdout" => {}
         other => {
-            patch_status(&ctx.client, &ns, &name, "Failed", &format!("unknown sink_type: {}", other)).await?;
+            patch_status(
+                &ctx.client,
+                &ns,
+                &name,
+                "Failed",
+                &format!("unknown sink_type: {}", other),
+            )
+            .await?;
             return Ok(Action::requeue(Duration::from_secs(60)));
         }
     }
@@ -76,9 +100,10 @@ async fn reconcile(sink: Arc<AuditSink>, ctx: Arc<Ctx>) -> Result<Action, kube::
             namespace: Some(ns.clone()),
             ..Default::default()
         },
-        data: Some(std::collections::BTreeMap::from([
-            ("sink.json".to_string(), config_data),
-        ])),
+        data: Some(std::collections::BTreeMap::from([(
+            "sink.json".to_string(),
+            config_data,
+        )])),
         ..Default::default()
     };
 
@@ -92,7 +117,14 @@ async fn reconcile(sink: Arc<AuditSink>, ctx: Arc<Ctx>) -> Result<Action, kube::
         .await?;
 
     info!(cm = %cm_name, "AuditSink ConfigMap written");
-    patch_status(&ctx.client, &ns, &name, "Active", "Sink configuration applied").await?;
+    patch_status(
+        &ctx.client,
+        &ns,
+        &name,
+        "Active",
+        "Sink configuration applied",
+    )
+    .await?;
 
     Ok(Action::requeue(Duration::from_secs(300)))
 }

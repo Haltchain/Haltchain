@@ -6,18 +6,16 @@ use json_patch::{AddOperation, Patch, PatchOperation};
 use jsonptr::Pointer;
 use k8s_openapi::api::core::v1::{Container, EnvVar, Pod, ResourceRequirements};
 use kube::{
-    core::{
-        admission::{AdmissionRequest, AdmissionResponse, AdmissionReview},
-        DynamicObject,
-    },
     ResourceExt,
+    core::{
+        DynamicObject,
+        admission::{AdmissionRequest, AdmissionResponse, AdmissionReview},
+    },
 };
 use tracing::{info, warn};
 
 /// Axum handler for POST /mutate-pods.
-pub async fn handle_mutate(
-    Json(review): Json<AdmissionReview<Pod>>,
-) -> impl IntoResponse {
+pub async fn handle_mutate(Json(review): Json<AdmissionReview<Pod>>) -> impl IntoResponse {
     let req: AdmissionRequest<Pod> = match review.try_into() {
         Ok(r) => r,
         Err(e) => {
@@ -39,7 +37,10 @@ pub async fn handle_mutate(
 }
 
 async fn mutate(req: AdmissionRequest<Pod>) -> anyhow::Result<AdmissionResponse> {
-    let pod = req.object.as_ref().ok_or_else(|| anyhow::anyhow!("No object in request"))?;
+    let pod = req
+        .object
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No object in request"))?;
     let annotations = pod
         .metadata
         .annotations
@@ -48,7 +49,11 @@ async fn mutate(req: AdmissionRequest<Pod>) -> anyhow::Result<AdmissionResponse>
         .unwrap_or_default();
 
     // Only inject if the annotation is present and true.
-    if annotations.get("haltchain.io/inject-sidecar").map(String::as_str) != Some("true") {
+    if annotations
+        .get("haltchain.io/inject-sidecar")
+        .map(String::as_str)
+        != Some("true")
+    {
         return Ok(AdmissionResponse::from(&req));
     }
 
