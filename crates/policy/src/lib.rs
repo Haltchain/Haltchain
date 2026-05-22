@@ -2,6 +2,9 @@ pub const MAX_TRANSFER_USD: f64 = 1_000.0; //max transfer
 pub const MAX_ACTIONS_PER_MINUTE: usize = 10; //max action
 pub const CIRCUIT_BREAK_SECS: u64 = 300; //hold time
 
+pub mod jsonb;
+pub use jsonb::JsonbPolicy;
+
 // ─── Core decision type
 
 /// Outcome of a single policy check.
@@ -70,12 +73,16 @@ pub struct ActionContext {
     pub max_tokens_per_minute: Option<f64>,
     pub max_compute_seconds_per_hour: Option<f64>,
     pub api_rate_limit_pct: Option<f64>,
+    // Egress volume (bytes exported in this session)
+    pub egress_bytes: Option<u64>,
+    pub max_egress_bytes_per_minute: Option<u64>,
 }
 
 // ─── Domain modules
 
 pub mod aggregate;
 pub mod compliance;
+pub mod egress;
 pub mod financial;
 pub mod operational;
 pub mod privacy;
@@ -84,6 +91,7 @@ pub mod security;
 // Re-export all domain types for backward compatibility.
 pub use aggregate::{AggregateBreaker, AggregateMode, PolicyEngine};
 pub use compliance::ComplianceBreaker;
+pub use egress::EgressBreaker;
 pub use financial::FinancialBreaker;
 pub use operational::OperationalBreaker;
 pub use privacy::PrivacyBreaker;

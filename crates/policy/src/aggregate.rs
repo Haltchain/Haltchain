@@ -1,6 +1,6 @@
 use crate::{
-    ActionContext, CircuitBreaker, ComplianceBreaker, FinancialBreaker, OperationalBreaker,
-    PolicyResult, PrivacyBreaker, ResourceBreaker, SecurityBreaker,
+    ActionContext, CircuitBreaker, ComplianceBreaker, EgressBreaker, FinancialBreaker,
+    OperationalBreaker, PolicyResult, PrivacyBreaker, ResourceBreaker, SecurityBreaker,
 };
 
 /// Logical composition mode for sub-breakers.
@@ -59,6 +59,7 @@ impl AggregateBreaker {
                 Box::new(OperationalBreaker::default()),
                 Box::new(ComplianceBreaker::default()),
                 Box::new(ResourceBreaker::default()),
+                Box::new(EgressBreaker::default()),
             ],
             AggregateMode::Any,
         )
