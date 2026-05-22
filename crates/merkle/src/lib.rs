@@ -4,7 +4,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 fn sha256(data: &[u8]) -> [u8; 32] {
     let mut h = Sha256::new();
@@ -38,6 +38,127 @@ fn merkle_root(leaves: &[[u8; 32]]) -> Option<[u8; 32]> {
         layer = next;
     }
     Some(layer[0])
+}
+
+/// Direction of a sibling node in the Merkle inclusion proof path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProofDirection {
+    /// The sibling hash is on the left (our node was the right child).
+    Left,
+    /// The sibling hash is on the right (our node was the left child).
+    Right,
+}
+
+/// A single step in a Merkle inclusion proof.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProofStep {
+    pub sibling_hash: String,
+    pub direction: ProofDirection,
+}
+
+/// Merkle inclusion proof: a path from a leaf to the root.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MerkleInclusionProof {
+    pub leaf_index: usize,
+    pub leaf_hash: String,
+    pub root_hash: String,
+    pub steps: Vec<ProofStep>,
+}
+
+/// Generate a Merkle inclusion proof for the leaf at `leaf_index`.
+fn generate_inclusion_proof(
+    leaves: &[[u8; 32]],
+    leaf_index: usize,
+) -> Option<MerkleInclusionProof> {
+    if leaves.is_empty() || leaf_index >= leaves.len() {
+        return None;
+    }
+
+    let mut steps = Vec::new();
+    let mut layer: Vec<[u8; 32]> = leaves.to_vec();
+    let mut idx = leaf_index;
+
+    while layer.len() > 1 {
+        let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+        let sibling = if sibling_idx < layer.len() {
+            layer[sibling_idx]
+        } else {
+            // Odd layer: last node is duplicated, sibling is itself.
+            layer[idx]
+        };
+
+        let direction = if idx % 2 == 0 {
+            ProofDirection::Right
+        } else {
+            ProofDirection::Left
+        };
+
+        steps.push(ProofStep {
+            sibling_hash: hex::encode(sibling),
+            direction,
+        });
+
+        // Advance to parent layer.
+        let mut next = Vec::with_capacity(layer.len().div_ceil(2));
+        let mut i = 0;
+        while i < layer.len() {
+            let left = layer[i];
+            let right = if i + 1 < layer.len() {
+                layer[i + 1]
+            } else {
+                layer[i]
+            };
+            let mut combined = [0u8; 64];
+            combined[..32].copy_from_slice(&left);
+            combined[32..].copy_from_slice(&right);
+            next.push(sha256(&combined));
+            i += 2;
+        }
+        layer = next;
+        idx /= 2;
+    }
+
+    Some(MerkleInclusionProof {
+        leaf_index,
+        leaf_hash: hex::encode(leaves[leaf_index]),
+        root_hash: hex::encode(layer[0]),
+        steps,
+    })
+}
+
+/// Verify a Merkle inclusion proof against a known root.
+pub fn verify_inclusion_proof(proof: &MerkleInclusionProof) -> bool {
+    let Ok(mut current) = hex::decode(&proof.leaf_hash) else {
+        return false;
+    };
+    if current.len() != 32 {
+        return false;
+    }
+
+    for step in &proof.steps {
+        let Ok(sibling) = hex::decode(&step.sibling_hash) else {
+            return false;
+        };
+        if sibling.len() != 32 {
+            return false;
+        }
+        let mut combined = [0u8; 64];
+        match step.direction {
+            ProofDirection::Right => {
+                // Our node is on the left, sibling on the right.
+                combined[..32].copy_from_slice(&current);
+                combined[32..].copy_from_slice(&sibling);
+            }
+            ProofDirection::Left => {
+                // Sibling is on the left, our node on the right.
+                combined[..32].copy_from_slice(&sibling);
+                combined[32..].copy_from_slice(&current);
+            }
+        }
+        current = sha256(&combined).to_vec();
+    }
+
+    hex::encode(&current) == proof.root_hash
 }
 
 /// Collects signed decision hashes across the day; rolls over at UTC midnight.
@@ -123,6 +244,19 @@ impl MerkleAccumulator {
             day_of_year: inner.day,
         }
     }
+
+    /// Generate a Merkle inclusion proof for the leaf at `index`.
+    ///
+    /// Returns `None` if the index is out of range or no leaves exist.
+    pub fn prove(&self, leaf_index: usize) -> Option<MerkleInclusionProof> {
+        let inner = self.inner.lock();
+        generate_inclusion_proof(&inner.leaves, leaf_index)
+    }
+
+    /// Returns the number of leaves accumulated today.
+    pub fn leaf_count(&self) -> usize {
+        self.inner.lock().leaves.len()
+    }
 }
 
 impl DistributedMerkleVerifier {
@@ -182,8 +316,18 @@ impl DistributedMerkleVerifier {
         let message = format!("{root_hex}:{day_of_year}");
         let mut valid_attestations = 0usize;
         let mut results = Vec::with_capacity(attestations.len());
+        let mut seen_witnesses: HashSet<&str> = HashSet::with_capacity(attestations.len());
 
         for a in attestations {
+            if !seen_witnesses.insert(a.witness_id.as_str()) {
+                results.push(WitnessVerification {
+                    witness_id: a.witness_id.clone(),
+                    verified: false,
+                    reason: Some("duplicate witness attestation".to_string()),
+                });
+                continue;
+            }
+
             let Some(key) = self.witnesses.get(&a.witness_id) else {
                 results.push(WitnessVerification {
                     witness_id: a.witness_id.clone(),
@@ -246,6 +390,97 @@ mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
 
+    // ── Inclusion proof tests ──
+
+    #[test]
+    fn inclusion_proof_single_leaf() {
+        let acc = MerkleAccumulator::new();
+        acc.push("tx1", "2026-01-01T00:00:00Z", "ALLOW", "sig1");
+        let proof = acc.prove(0).expect("single leaf must produce proof");
+        assert!(
+            verify_inclusion_proof(&proof),
+            "single leaf proof must verify"
+        );
+        assert!(proof.steps.is_empty(), "single leaf needs no siblings");
+        assert_eq!(proof.root_hash, proof.leaf_hash);
+    }
+
+    #[test]
+    fn inclusion_proof_two_leaves() {
+        let acc = MerkleAccumulator::new();
+        acc.push("tx1", "t1", "ALLOW", "s1");
+        acc.push("tx2", "t2", "DENY", "s2");
+        for i in 0..2 {
+            let proof = acc.prove(i).expect("proof must exist");
+            assert!(
+                verify_inclusion_proof(&proof),
+                "proof for leaf {i} must verify"
+            );
+            assert_eq!(proof.steps.len(), 1);
+        }
+    }
+
+    #[test]
+    fn inclusion_proof_odd_leaf_count() {
+        let acc = MerkleAccumulator::new();
+        for i in 0..5 {
+            acc.push(&format!("tx{i}"), "t", "ALLOW", "s");
+        }
+        let status = acc.status();
+        let root_hex = status.root_hex.expect("must have root");
+        for i in 0..5 {
+            let proof = acc.prove(i).expect("proof must exist");
+            assert_eq!(
+                proof.root_hash, root_hex,
+                "proof root must match accumulator root"
+            );
+            assert!(
+                verify_inclusion_proof(&proof),
+                "proof for leaf {i} must verify"
+            );
+        }
+    }
+
+    #[test]
+    fn inclusion_proof_power_of_two_leaves() {
+        let acc = MerkleAccumulator::new();
+        for i in 0..8 {
+            acc.push(&format!("tx{i}"), "t", "ALLOW", "s");
+        }
+        for i in 0..8 {
+            let proof = acc.prove(i).expect("proof must exist");
+            assert_eq!(proof.steps.len(), 3, "depth of 8-leaf tree is 3");
+            assert!(verify_inclusion_proof(&proof));
+        }
+    }
+
+    #[test]
+    fn tampered_proof_fails_verification() {
+        let acc = MerkleAccumulator::new();
+        acc.push("tx1", "t1", "ALLOW", "s1");
+        acc.push("tx2", "t2", "DENY", "s2");
+        let mut proof = acc.prove(0).expect("proof must exist");
+        // Tamper with the leaf hash.
+        proof.leaf_hash = hex::encode([0xffu8; 32]);
+        assert!(!verify_inclusion_proof(&proof), "tampered proof must fail");
+    }
+
+    #[test]
+    fn out_of_range_index_returns_none() {
+        let acc = MerkleAccumulator::new();
+        acc.push("tx1", "t1", "ALLOW", "s1");
+        assert!(acc.prove(1).is_none());
+        assert!(acc.prove(100).is_none());
+    }
+
+    #[test]
+    fn empty_accumulator_proof_returns_none() {
+        let acc = MerkleAccumulator::new();
+        assert!(acc.prove(0).is_none());
+    }
+
+    // ── Distributed verification tests ──
+
     #[test]
     fn distributed_verification_requires_threshold() {
         let k1 = SigningKey::from_bytes(&[1u8; 32]);
@@ -297,5 +532,39 @@ mod tests {
         let status = verifier.verify(&root_hex, day, &attestations);
         assert!(status.verified);
         assert_eq!(status.valid_attestations, 2);
+    }
+
+    #[test]
+    fn distributed_verification_rejects_duplicate_witness_attestations() {
+        let k1 = SigningKey::from_bytes(&[33u8; 32]);
+        let k2 = SigningKey::from_bytes(&[44u8; 32]);
+        let mut witnesses = HashMap::new();
+        witnesses.insert("w1".to_string(), k1.verifying_key());
+        witnesses.insert("w2".to_string(), k2.verifying_key());
+        let verifier = DistributedMerkleVerifier::with_witnesses(witnesses, 2);
+
+        let root_hex = "ef".repeat(32);
+        let day = 101;
+        let msg = format!("{root_hex}:{day}");
+        let s1 = k1.sign(msg.as_bytes());
+
+        let attestation = RootAttestation {
+            witness_id: "w1".to_string(),
+            signature_b64: general_purpose::STANDARD.encode(s1.to_bytes()),
+        };
+        let attestations = vec![attestation.clone(), attestation];
+
+        let status = verifier.verify(&root_hex, day, &attestations);
+        assert!(
+            !status.verified,
+            "duplicate witness must not satisfy threshold"
+        );
+        assert_eq!(status.valid_attestations, 1);
+        assert!(
+            status
+                .results
+                .iter()
+                .any(|r| r.reason.as_deref() == Some("duplicate witness attestation"))
+        );
     }
 }
