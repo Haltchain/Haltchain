@@ -55,7 +55,7 @@ export function AuthGate({ children, forceOpen = false }: AuthGateProps) {
       setUnlocked(true);
       setShowUnlock(false);
       toast({ title: "Signed in", description: "Welcome back." });
-      navigate("/dashboard/review-queue");
+      navigate("/dashboard/compliance");
     } catch (err) {
       toast({
         title: "Sign in failed",
@@ -90,8 +90,11 @@ export function AuthGate({ children, forceOpen = false }: AuthGateProps) {
       <Dialog open={showUnlock} onOpenChange={setShowUnlock}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Admin Sign In</DialogTitle>
-            <DialogDescription>Enter your admin email and password to access the dashboard.</DialogDescription>
+            <DialogTitle>Admin sign-in</DialogTitle>
+            <DialogDescription>
+              Use the account from <code className="text-xs">HALTCHAIN_BOOTSTRAP_ADMIN_EMAIL</code> / password env vars on the API.
+              Validation traffic still uses API keys + Ed25519 on <code className="text-xs">/validate</code> — that is separate from this session.
+            </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <Input
