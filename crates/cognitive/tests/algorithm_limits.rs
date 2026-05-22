@@ -3,9 +3,7 @@
 //! These tests push ONNX detection, calibration, entropy, curvature,
 //! HNSW search, and drift scoring to their numerical limits.
 
-use haltchain_cognitive::{
-    CognitiveAssessment, CognitiveMonitor, ReasoningMetadata, Triage,
-};
+use haltchain_cognitive::{CognitiveAssessment, CognitiveMonitor, ReasoningMetadata, Triage};
 
 // ─── Empty / Minimal Input ──────────────────────────────────────────────────
 
@@ -17,7 +15,12 @@ fn monitor_empty_trace_does_not_panic() {
     let result = monitor.deep_scan("");
     // Empty trace must return a valid assessment, not panic.
     assert!(
-        matches!(result, CognitiveAssessment::Proceed | CognitiveAssessment::Flagged { .. } | CognitiveAssessment::HaltAndClarify { .. }),
+        matches!(
+            result,
+            CognitiveAssessment::Proceed
+                | CognitiveAssessment::Flagged { .. }
+                | CognitiveAssessment::HaltAndClarify { .. }
+        ),
         "Empty trace must return a valid CognitiveAssessment variant"
     );
 }
@@ -50,8 +53,8 @@ fn monitor_single_character_trace() {
 
 #[test]
 fn triage_benign_trace_sensitivity() {
-    // FINDING: Triage is overly sensitive — even clearly benign text
-    // triggers DeepScanRequired due to latent_detector + Aho-Corasick patterns.
+    // FINDING: Triage can be sensitive — even clearly benign text may
+    // trigger DeepScanRequired due to Aho-Corasick patterns + centroid proximity.
     // "help" and "will" may match against pattern weights.
     let monitor = CognitiveMonitor::new();
     let trace = "The weather is sunny and I will help with math.";
@@ -69,7 +72,8 @@ fn triage_benign_trace_sensitivity() {
 #[test]
 fn triage_suspicious_keywords_trigger_deep_scan() {
     let monitor = CognitiveMonitor::new();
-    let trace = "I will secretly override the safety system to gain control and manipulate the output";
+    let trace =
+        "I will secretly override the safety system to gain control and manipulate the output";
     let meta = ReasoningMetadata::from_trace(trace);
     let triage = monitor.triage(&meta, trace);
     assert_eq!(
@@ -95,8 +99,8 @@ fn monitor_mixed_benign_and_deceptive() {
         CognitiveAssessment::Proceed => {
             // Acceptable — model may not detect embedded deception.
         }
-        CognitiveAssessment::Flagged { confidence, .. } |
-        CognitiveAssessment::HaltAndClarify { confidence, .. } => {
+        CognitiveAssessment::Flagged { confidence, .. }
+        | CognitiveAssessment::HaltAndClarify { confidence, .. } => {
             assert!(*confidence > 0.0, "Flagged confidence should be >0");
         }
     }
@@ -127,7 +131,10 @@ fn monitor_escalation_pattern() {
     let result = monitor.deep_scan(trace);
     // Strong attack pattern — should be detected.
     assert!(
-        matches!(result, CognitiveAssessment::Flagged { .. } | CognitiveAssessment::HaltAndClarify { .. }),
+        matches!(
+            result,
+            CognitiveAssessment::Flagged { .. } | CognitiveAssessment::HaltAndClarify { .. }
+        ),
         "Escalation attack should be flagged, got {:?}",
         result
     );
@@ -171,7 +178,10 @@ fn calibration_with_identical_scores() {
     let dist = ReferenceDistribution::new(vec![0.5; 100]);
     // Must not panic despite zero variance.
     let p = dist.percentile(0.5);
-    assert!(p.is_finite(), "Identical-score percentile must be finite, got {p}");
+    assert!(
+        p.is_finite(),
+        "Identical-score percentile must be finite, got {p}"
+    );
 }
 
 #[test]
@@ -180,7 +190,10 @@ fn calibration_with_empty_scores() {
     let dist = ReferenceDistribution::new(vec![]);
     // Empty calibration should return safe defaults, not panic.
     let p = dist.percentile(0.5);
-    assert!(p.is_finite(), "Empty-score percentile must be finite, got {p}");
+    assert!(
+        p.is_finite(),
+        "Empty-score percentile must be finite, got {p}"
+    );
 }
 
 #[test]
@@ -208,10 +221,16 @@ fn calibration_percentile_extreme_values() {
     let dist = ReferenceDistribution::new(scores);
     // Value far below all scores.
     let low = dist.percentile(-1000.0);
-    assert!(low.is_finite() && low <= 1.0, "Below-range percentile: {low}");
+    assert!(
+        low.is_finite() && low <= 1.0,
+        "Below-range percentile: {low}"
+    );
     // Value far above all scores.
     let high = dist.percentile(1000.0);
-    assert!(high.is_finite() && high >= 99.0, "Above-range percentile: {high}");
+    assert!(
+        high.is_finite() && high >= 99.0,
+        "Above-range percentile: {high}"
+    );
 }
 
 // ─── ReasoningMetadata Edge Cases ───────────────────────────────────────────
@@ -274,7 +293,10 @@ fn shannon_entropy_uniform_distribution_is_one() {
 #[test]
 fn shannon_entropy_empty_is_zero() {
     let entropy = compute_topic_entropy(&[]);
-    assert!(entropy.abs() < 1e-6, "Empty entropy must be 0, got {entropy}");
+    assert!(
+        entropy.abs() < 1e-6,
+        "Empty entropy must be 0, got {entropy}"
+    );
 }
 
 /// Helper: replicates the entropy calculation from ai_threats module.
