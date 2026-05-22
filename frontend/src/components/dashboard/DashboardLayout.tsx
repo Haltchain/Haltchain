@@ -7,6 +7,8 @@ import { Button } from "@/components/ui/button";
 import { useToast } from "@/hooks/use-toast";
 
 const NAV_ITEMS = [
+  { href: "/dashboard/compliance", label: "Compliance & evidence" },
+  { href: "/dashboard/audit-log", label: "Operator audit log" },
   { href: "/dashboard/review-queue", label: "Decision Review Queue" },
   { href: "/dashboard/recommendations", label: "Threshold Recommendations" },
   { href: "/dashboard/agents", label: "Agent Status Board" },

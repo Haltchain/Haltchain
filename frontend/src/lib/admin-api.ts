@@ -56,15 +56,41 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
+export type PublicHealth = {
+  status: string;
+  version: string;
+  service: string;
+};
+
+export async function getPublicHealth(): Promise<PublicHealth> {
+  const res = await fetch("/api/health");
+  if (!res.ok) {
+    throw new Error(`health failed: ${res.status}`);
+  }
+  return (await res.json()) as PublicHealth;
+}
+
 export function checkSession() {
   return request<{ unlocked: boolean }>("/api/auth/session");
 }
 
-export function login(email: string, password: string) {
-  return request<{ ok: boolean }>("/api/auth/admin/login", {
+export async function login(email: string, password: string) {
+  const res = await fetch("/api/auth/admin/login", {
     method: "POST",
+    headers: { "content-type": "application/json" },
+    credentials: "include",
     body: JSON.stringify({ email, password }),
   });
+  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+  if (!res.ok) {
+    throw new Error(data.error || `Login failed (${res.status})`);
+  }
+  return data as { ok: boolean };
+}
+
+export function getAuditLog(limit = 100) {
+  const q = Math.min(500, Math.max(1, limit));
+  return request<{ events: unknown[]; limit: number }>(`/api/admin/audit-log?limit=${q}`);
 }
 
 export function lockDashboard() {

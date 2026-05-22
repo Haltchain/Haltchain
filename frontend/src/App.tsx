@@ -13,6 +13,8 @@ import RiskAdvisoriesPage from "@/pages/dashboard/RiskAdvisories";
 import AgentIntentPage from "@/pages/dashboard/AgentIntent";
 import ABVariantsPage from "@/pages/dashboard/ABVariants";
 import AgentEvolutionPage from "@/pages/dashboard/AgentEvolution";
+import CompliancePage from "@/pages/dashboard/Compliance";
+import AuditLogPage from "@/pages/dashboard/AuditLog";
 
 // TanStack Query configuration
 const queryClient = new QueryClient({
@@ -29,6 +31,8 @@ function Router() {
     <Switch>
       <Route path="/" component={Home} />
       <Route path="/dashboard" component={UnlockPage} />
+      <Route path="/dashboard/compliance" component={CompliancePage} />
+      <Route path="/dashboard/audit-log" component={AuditLogPage} />
       <Route path="/dashboard/review-queue" component={ReviewQueuePage} />
       <Route path="/dashboard/recommendations" component={RecommendationsPage} />
       <Route path="/dashboard/agents" component={AgentsPage} />
