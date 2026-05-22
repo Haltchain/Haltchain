@@ -2,17 +2,50 @@
 name = "haltchain-bench"
 version = "0.1.0"
 edition = "2024"
+default-run = "bench"
 
 [[bin]]
 name = "bench"
 path = "src/main.rs"
 
 [[bin]]
-name = "saturation"
+name = "saturation_gate"
 path = "src/saturation.rs"
+
+[[bin]]
+name = "cache_hit_gate"
+path = "src/cache_hit_gate.rs"
+
+[[bin]]
+name = "unlogged_write_gate"
+path = "src/unlogged_write_gate.rs"
+
+[[bin]]
+name = "pgvector_search_gate"
+path = "src/pgvector_gate.rs"
 
 [[bench]]
 name = "latency_critical"
+harness = false
+
+[[bench]]
+name = "saturation_gate"
+path = "src/saturation.rs"
+harness = false
+
+[[bench]]
+name = "cache_hit_gate"
+path = "src/cache_hit_gate.rs"
+harness = false
+
+[[bench]]
+name = "unlogged_write_gate"
+path = "src/unlogged_write_gate.rs"
+harness = false
+
+[[bench]]
+name = "pgvector_search_gate"
+path = "src/pgvector_gate.rs"
 harness = false
 
 [dependencies]
@@ -23,8 +56,10 @@ haltchain-validator  = { path = "../validator" }
 haltchain-analytics  = { path = "../analytics" }
 haltchain-cache      = { path = "../cache" }
 haltchain-consensus  = { path = "../consensus" }
+haltchain-db         = { path = "../db" }
 haltchain-embeddings = { path = "../embeddings" }
 haltchain-policy     = { path = "../policy" }
+uuid                 = { workspace = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }

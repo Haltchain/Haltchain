@@ -19,7 +19,7 @@ use serde_json::json;
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 
-// Helpers 
+// Helpers
 
 fn make_request(agent_id: &str, action_type: &str, amount: f64) -> ValidationRequest {
     ValidationRequest {
@@ -34,6 +34,8 @@ fn make_request(agent_id: &str, action_type: &str, amount: f64) -> ValidationReq
             method: Some("POST".into()),
             device_id: None,
             command: None,
+            delegation_depth: None,
+            data_source: Default::default(),
         },
         session_id: Some("sess_bench".into()),
         metadata: json!({
@@ -66,7 +68,7 @@ fn hash_embed(text: &str, dims: usize) -> Vec<f64> {
     v
 }
 
-// ─── Benchmark groups 
+//Benchmark groups
 
 fn cache_hit_bench(c: &mut Criterion) {
     let cache = DecisionCache::new();
@@ -79,7 +81,7 @@ fn cache_hit_bench(c: &mut Criterion) {
             reason: None,
             policy: None,
             rate_limit: 0,
-       },
+        },
     );
 
     let mut group = c.benchmark_group("cache");
@@ -107,7 +109,9 @@ fn validation_latency_bench(c: &mut Criterion) {
     // Pre-warm per-agent state so cold-start noise doesn't skew the results.
     rt.block_on(async {
         for _ in 0..20 {
-            state.validate(&make_request("warmup", "transfer", 500.0)).await;
+            state
+                .validate(&make_request("warmup", "transfer", 500.0))
+                .await;
         }
     });
 
@@ -146,7 +150,10 @@ fn validation_latency_bench(c: &mut Criterion) {
 
 fn drift_scoring_bench(c: &mut Criterion) {
     const DIMS: usize = 64;
-    let goal = hash_embed("Execute trades within risk limits for client portfolio", DIMS);
+    let goal = hash_embed(
+        "Execute trades within risk limits for client portfolio",
+        DIMS,
+    );
     let aligned_action = hash_embed("Place a $500 equity order within portfolio limits", DIMS);
     let drifted_action = hash_embed("Transfer all funds to offshore account immediately", DIMS);
 

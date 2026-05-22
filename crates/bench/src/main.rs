@@ -21,6 +21,35 @@ const N_SESSIONS: usize = 10;
 
 #[tokio::main]
 async fn main() {
+    let mut json_out = std::env::var("HALTCHAIN_BENCH_JSON_OUT").ok();
+    let mut dry_run = false;
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json-out" => {
+                if let Some(v) = args.get(i + 1) {
+                    json_out = Some(v.clone());
+                    i += 1;
+                }
+            }
+            "--dry-run" => dry_run = true,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if dry_run {
+        println!(
+            "dry-run: transactions={} agents={} sessions={} json_out={}",
+            N_TRANSACTIONS,
+            N_AGENTS,
+            N_SESSIONS,
+            json_out.as_deref().unwrap_or("-")
+        );
+        return;
+    }
+
     let state = AppState::new();
 
     // Pre-warm: prime per-agent state so cold-start noise doesn't skew results.
@@ -43,10 +72,29 @@ async fn main() {
 
     // CI gate uses the concurrent p99 (sequential hides lock contention).
     let p99_conc = percentile(&conc_latencies, 0.99);
+    let p50_conc = percentile(&conc_latencies, 0.50);
+    let p95_conc = percentile(&conc_latencies, 0.95);
     let target_us: u64 = std::env::var("HALTCHAIN_BENCH_P99_TARGET_US")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(5_000); // 5 ms — realistic under concurrent load
+
+    if let Some(path) = json_out.as_deref() {
+        let payload = json!({
+            "gate": "validator_latency_critical",
+            "transactions": N_TRANSACTIONS,
+            "agents": N_AGENTS,
+            "p50_us": p50_conc,
+            "p95_us": p95_conc,
+            "p99_us": p99_conc,
+            "target_p99_us": target_us
+        });
+        if let Err(e) = std::fs::write(path, serde_json::to_vec_pretty(&payload).unwrap()) {
+            eprintln!("FAIL: could not write json artifact to {path}: {e}");
+            std::process::exit(2);
+        }
+    }
+
     if p99_conc <= target_us {
         println!("\n✓ concurrent p99 {p99_conc} µs ≤ target {target_us} µs");
     } else {
@@ -124,6 +172,8 @@ fn make_request(agent_idx: usize, amount: f64, action_type: &str) -> ValidationR
             method: Some("POST".into()),
             device_id: None,
             command: None,
+            delegation_depth: None,
+            data_source: Default::default(),
         },
         session_id: Some(format!("sess_{agent_idx:03}_{session_idx}")),
         metadata: json!({
