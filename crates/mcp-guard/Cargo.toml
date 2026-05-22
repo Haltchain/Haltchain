@@ -1,0 +1,28 @@
+[package]
+name = "haltchain-mcp-guard"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = { workspace = true }
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "json"] }
+pgvector = { version = "0.4", features = ["sqlx"] }
+sha2 = { workspace = true }
+hex = { workspace = true }
+tracing = { workspace = true }
+aho-corasick = "1"
+haltchain-cognitive = { path = "../cognitive" }
+haltchain-cache = { path = "../cache" }
+haltchain-signing = { path = "../signing" }
+haltchain-merkle = { path = "../merkle" }
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[[bench]]
+name = "mcp_guard_latency"
+harness = false
