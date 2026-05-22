@@ -5,9 +5,24 @@
 //!   HALTCHAIN_TLS_KEY       — path to server PEM private key
 //!   HALTCHAIN_TLS_CLIENT_CA — path to PEM CA bundle used to verify client certs
 //!
+//! ## SPIFFE / SPIRE integration
+//!
+//! When running inside a SPIRE-managed cluster the SVID is refreshed automatically.
+//! Point the three env vars above at the SPIRE agent's x.509 SVID output files:
+//!
+//! ```text
+//! HALTCHAIN_TLS_CERT=/run/spire/svids/svid.pem
+//! HALTCHAIN_TLS_KEY=/run/spire/svids/svid_key.pem
+//! HALTCHAIN_TLS_CLIENT_CA=/run/spire/svids/bundle.pem
+//! ```
+//!
+//! Start `SpiffeReloader::spawn()` after building the initial acceptor to
+//! automatically reload certificates when SPIRE rotates the SVID (typically
+//! every hour).  The reloader polls every `HALTCHAIN_SVID_POLL_SECS` (default 60).
+//!
 //! If the vars are absent the server binds plain HTTP (dev-mode).
 
-use std::{fs, io::BufReader, sync::Arc};
+use std::{fs, io::BufReader, sync::Arc, time::SystemTime};
 
 use rustls::{
     RootCertStore, ServerConfig,
@@ -16,7 +31,7 @@ use rustls::{
 };
 use rustls_pemfile::{certs, pkcs8_private_keys, rsa_private_keys};
 use tokio_rustls::TlsAcceptor;
-use tracing::info;
+use tracing::{info, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TlsError {
@@ -107,5 +122,101 @@ pub fn tls_acceptor_from_env() -> Option<TlsAcceptor> {
             // operator fixes certs before going live.
             panic!("Failed to initialise TLS (env vars present but invalid): {e}");
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SPIFFE SVID rotation watcher
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Watches SPIRE-managed SVID PEM files and rebuilds the `TlsAcceptor` when
+/// the certificate file changes on disk.
+///
+/// SPIRE rotates X.509 SVIDs (default TTL: 1 h) by writing new PEM files to the
+/// path configured in the SPIRE agent's `SVIDStore "disk"` plugin, or via a
+/// Kubernetes projected volume managed by cert-manager + SPIFFE issuer.
+///
+/// The reloader polls every `poll_secs` (default: 60 s) which is well under
+/// the typical SPIRE SVID TTL.
+///
+/// Usage:
+/// ```rust
+/// let acceptor = Arc::new(parking_lot::RwLock::new(tls_acceptor_from_env()));
+/// SpiffeReloader::spawn(acceptor.clone());
+/// ```
+pub struct SpiffeReloader {
+    cert_path: String,
+    key_path: String,
+    ca_path: Option<String>,
+    poll_secs: u64,
+    acceptor: Arc<parking_lot::RwLock<Option<TlsAcceptor>>>,
+}
+
+impl SpiffeReloader {
+    /// Create a reloader from environment variables and spawn it as a background task.
+    ///
+    /// Does nothing if the TLS env vars are not set.
+    pub fn spawn(acceptor: Arc<parking_lot::RwLock<Option<TlsAcceptor>>>) {
+        let cert = match std::env::var("HALTCHAIN_TLS_CERT") {
+            Ok(v) => v,
+            Err(_) => return, // TLS not configured — nothing to rotate
+        };
+        let key = match std::env::var("HALTCHAIN_TLS_KEY") {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let ca = std::env::var("HALTCHAIN_TLS_CLIENT_CA").ok();
+        let poll_secs: u64 = std::env::var("HALTCHAIN_SVID_POLL_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+
+        let reloader = SpiffeReloader {
+            cert_path: cert,
+            key_path: key,
+            ca_path: ca,
+            poll_secs,
+            acceptor,
+        };
+
+        tokio::spawn(async move { reloader.run().await });
+    }
+
+    async fn run(self) {
+        info!(
+            poll_secs = self.poll_secs,
+            cert = %self.cert_path,
+            "SPIFFE SVID reloader started"
+        );
+
+        let mut last_mtime = self.cert_mtime();
+
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(self.poll_secs)).await;
+
+            let mtime = self.cert_mtime();
+            if mtime == last_mtime {
+                continue; // cert unchanged — nothing to do
+            }
+            last_mtime = mtime;
+
+            info!("SVID cert file changed — reloading TLS acceptor");
+            match build_tls_acceptor(&self.cert_path, &self.key_path, self.ca_path.as_deref()) {
+                Ok(new_acceptor) => {
+                    *self.acceptor.write() = Some(new_acceptor);
+                    info!("TLS acceptor reloaded with new SVID");
+                }
+                Err(e) => {
+                    warn!("Failed to reload TLS acceptor after SVID rotation: {e}");
+                    // Keep the previous acceptor — connections continue until the old SVID expires.
+                }
+            }
+        }
+    }
+
+    fn cert_mtime(&self) -> Option<SystemTime> {
+        fs::metadata(&self.cert_path)
+            .ok()
+            .and_then(|m| m.modified().ok())
     }
 }
