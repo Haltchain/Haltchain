@@ -65,7 +65,10 @@ impl AlertTier {
 
     /// Returns true if tier requires some action (Medium or higher)
     pub fn requires_action(&self) -> bool {
-        matches!(self, AlertTier::Medium | AlertTier::High | AlertTier::Critical)
+        matches!(
+            self,
+            AlertTier::Medium | AlertTier::High | AlertTier::Critical
+        )
     }
 }
 
@@ -107,9 +110,15 @@ mod tests {
     fn alert_tier_from_percentile() {
         assert!(matches!(AlertTier::from_percentile(50.0), AlertTier::None));
         assert!(matches!(AlertTier::from_percentile(85.0), AlertTier::Low));
-        assert!(matches!(AlertTier::from_percentile(97.0), AlertTier::Medium));
+        assert!(matches!(
+            AlertTier::from_percentile(97.0),
+            AlertTier::Medium
+        ));
         assert!(matches!(AlertTier::from_percentile(99.7), AlertTier::High));
-        assert!(matches!(AlertTier::from_percentile(99.95), AlertTier::Critical));
+        assert!(matches!(
+            AlertTier::from_percentile(99.95),
+            AlertTier::Critical
+        ));
     }
 
     #[test]

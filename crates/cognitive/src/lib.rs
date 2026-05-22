@@ -3,62 +3,60 @@ pub mod calibration;
 pub mod context;
 pub mod drift;
 pub mod ensemble_divergence;
-pub mod goal_drift;
-pub mod guardian;
-pub mod latent_markers;
+pub mod intent;
+pub mod learning;
 pub mod math;
 pub mod monitor;
-pub mod neural_probes;
 pub mod onnx_detector;
 pub mod patterns;
 pub mod robust_detector;
 pub mod semantic_monitoring;
+pub mod structural_invariants;
 pub mod types;
-pub mod zedd_monitor;
 
 // Re-export commonly used math functions for convenience
-pub use math::{jensen_shannon_divergence, kl_divergence, l2_normalize, euclidean_distance, cosine_similarity_normalized};
+pub use math::{
+    cosine_similarity_normalized, euclidean_distance, jensen_shannon_divergence, kl_divergence,
+    l2_normalize,
+};
 
 // Re-export canonical AlertTier (AC-05 FIX: unified type)
 pub use types::{AlertTier, DecisionRegion};
 
 // Section 6: AI Threat Detection
 pub use ai_threats::{
-    PromptInjectionDetector, InjectionResult, DetectionMethod,
-    BehavioralMarker, BehavioralMarkerEngine, InversionRisk, RiskLevel,
-    SecurityAlert, Severity, AlertType, DynamicPlaybook, ResponseResult,
-    ContainmentLevel, SiemInterface, MockSiem, QueryRecord, Context,
+    AlertType, BehavioralMarker, BehavioralMarkerEngine, CommandContainmentBridge,
+    ContainmentBridge, ContainmentExecutorMode, ContainmentLevel, Context, DetectionMethod,
+    DeterministicContainmentBridge, DynamicPlaybook, InjectionResult, InversionRisk,
+    MockContainmentBridge, MockSiem, PromptInjectionDetector, QueryRecord, ResponseResult,
+    RiskLevel, SecurityAlert, Severity, SiemInterface, WebhookSiem,
+    build_containment_bridge_from_env,
 };
 
-pub use calibration::{CalibrationDB, CalibratedScore, TieredDecision, default_calibration};
-pub use context::{analyze_context, adjust_confidence, classify_context};
-pub use drift::{MultiScaleAnalyzer, core_distance, zedd_drift_score, robust_similarity};
-pub use ensemble_divergence::{KCoreDistanceDetector, DriftScore};
-pub use goal_drift::{
-    GoalDriftMonitor, CoTMonitor, IntegratedGoalMonitor,
-    DriftReport, DriftRecommendation, DivergenceClass,
-    CoTAssessment, CoTClassification, IntegratedReport,
+pub use calibration::{CalibratedScore, CalibrationDB, TieredDecision, default_calibration};
+pub use context::{adjust_confidence, analyze_context, classify_context};
+pub use drift::{MultiScaleAnalyzer, core_distance, robust_similarity, zedd_drift_score};
+pub use ensemble_divergence::{DriftScore, KCoreDistanceDetector};
+pub use intent::{IntentLabel, classify_intent};
+pub use learning::{
+    fp_count, record_false_positive, record_true_positive, suggested_benign_refresh_count, tp_count,
 };
-pub use guardian::{MonitorGuardian, AgentObservation, SafetyAssessment, RoguePattern, ContainmentAction};
 pub use monitor::{CognitiveAssessment, CognitiveMonitor, ReasoningMetadata, Triage};
-pub use latent_markers::{
-    LatentPatternDetector, LatentThreatAssessment, LatentDetails,
-    POWER_SEEKING_PATTERNS, REWARD_HACKING_PATTERNS, COVERT_COMMUNICATION_PATTERNS,
-    SEMANTIC_CLUSTERS,
+pub use onnx_detector::{CalibrationPipeline, MultiScaleResult, OnnxDetectionResult, OnnxDetector};
+pub use patterns::{
+    COVERT_COMMUNICATION_PATTERNS, POWER_SEEKING_PATTERNS, REWARD_HACKING_PATTERNS,
+    ReasoningPattern,
 };
-pub use onnx_detector::{OnnxDetector, OnnxDetectionResult, MultiScaleResult, CalibrationPipeline};
-pub use patterns::ReasoningPattern;
 pub use robust_detector::{
-    CalibrationStats, AlignmentFakingDetector, ContextAwareDetector,
-    ContextClassifier, ContextType, CoreDistanceDetector, DetectionResult,
-    ContextualResult, FakingResult,
+    CalibrationStats, ContextAwareDetector, ContextClassifier, ContextType, ContextualResult,
+    CoreDistanceDetector, DetectionResult, FakingResult,
+};
+pub use structural_invariants::{
+    ActionDescriptor, InvariantClass, StructuralVerdict, evaluate as evaluate_structural_invariants,
 };
 
 // Section 5: Semantic Monitoring
 pub use semantic_monitoring::{
-    SemanticDriftDetector, ZeddResult, HnswIndex, CrossModalMonitor,
-    ConsistencyScore, HierarchicalMonitor, LayerEmbedding, CoherenceReport,
-    HierarchyViolation, PersistentHomologyAnalyzer, TopologicalFeatures,
+    CoherenceReport, ConsistencyScore, CrossModalMonitor, HierarchicalMonitor, HierarchyViolation,
+    HnswIndex, LayerEmbedding, SemanticDriftDetector, ZeddResult,
 };
-
-pub use zedd_monitor::{ZeddMonitor, ZeddAssessment};
