@@ -1,0 +1,108 @@
+# EU AI Act Regulatory Rule Pack
+# Covers: Article 9 (risk management), Article 14 (human oversight),
+# Article 52 (transparency), Article 72 (post-market monitoring)
+# Applies to high-risk AI systems as classified under Annex III
+version: "1"
+max_delegation_depth: 3
+
+rules:
+  #  Article 14(1): Human Oversight Checkpoint 
+  - id: euaia_human_oversight
+    priority: safety
+    description: >
+      Enforce human-in-the-loop for high-value decisions. High-risk AI
+      systems must allow human oversight as per Art. 14(1).
+      Transfer amount >$500 requires human review.
+    condition:
+      field: amount
+      op: gt
+      value: 500.0
+    action: flag
+    message: "EU AI Act Art. 14 — Human oversight checkpoint: high-value decision requires review"
+    depends_on: []
+
+  #  Article 9(2): Risk Management — Anomaly Detection
+  - id: euaia_risk_anomaly
+    priority: safety
+    description: >
+      Circuit-break when risk management system detects anomalous behaviour.
+      Art. 9(2) requires identification and analysis of known/foreseeable risks.
+    condition:
+      field: anomaly_score
+      op: gt
+      value: 0.7
+    action: circuit_break
+    message: "EU AI Act Art. 9 — Risk management: anomalous behaviour detected"
+    depends_on: []
+
+  #  Article 9(7): Residual Risk Mitigation
+  - id: euaia_velocity_risk
+    priority: compliance
+    description: >
+      Flag high-velocity operations as a residual risk indicator.
+      Art. 9(7) requires testing to ensure residual risks are acceptable.
+    condition:
+      field: ewma_velocity
+      op: gt
+      value: 0.15
+    action: flag
+    message: "EU AI Act Art. 9(7) — Elevated operational velocity; residual risk flag"
+    depends_on: []
+
+  # ── Article 14(4): Human Override Capability ───────────────────────────────
+  - id: euaia_delegation_limit
+    priority: safety
+    description: >
+      Limit autonomous agent delegation chains. Deep delegation reduces
+      human ability to understand/override decisions (Art. 14(4)).
+    condition:
+      field: delegation_depth
+      op: gt
+      value: 2
+    action: deny
+    message: "EU AI Act Art. 14(4) — Delegation depth exceeds human oversight limit"
+    depends_on: []
+
+  #  Article 52: Transparency — Scope Declaration
+  - id: euaia_transparency_scope
+    priority: compliance
+    description: >
+      Deny when AI system accesses capabilities not declared in its
+      technical documentation. Art. 52 requires transparency about
+      AI system capabilities.
+    condition:
+      field: accessing_undeclared_service
+      op: eq
+      value: true
+    action: deny
+    message: "EU AI Act Art. 52 — Undeclared capability access; transparency violation"
+    depends_on: []
+
+  #  Article 72: Post-Market Monitoring 
+  - id: euaia_postmarket_flag
+    priority: compliance
+    description: >
+      Flag all anomalous actions for post-market monitoring system.
+      Art. 72 requires providers to establish post-market monitoring.
+    condition:
+      field: is_anomaly
+      op: eq
+      value: true
+    action: flag
+    message: "EU AI Act Art. 72 — Anomaly flagged for post-market monitoring collection"
+    depends_on: []
+
+  #  Article 10: Data Governance 
+  - id: euaia_data_governance
+    priority: compliance
+    description: >
+      Enforce data governance requirements. Training and validation data
+      must be relevant, representative, and free from errors (Art. 10).
+      Block PII-laden payloads that violate data governance policies.
+    condition:
+      field: payload_contains_pii
+      op: eq
+      value: true
+    action: flag
+    message: "EU AI Act Art. 10 — PII in payload flagged for data governance review"
+    depends_on: []

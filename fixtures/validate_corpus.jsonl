@@ -1,0 +1,3 @@
+{"id": "allow_small_transfer", "action": {"type": "transfer", "amount": 100, "currency": "USD"}, "metadata": {}, "expect": {"decision": "ALLOW"}}
+{"id": "deny_large_transfer", "action": {"type": "transfer", "amount": 10000, "currency": "USD"}, "metadata": {}, "expect": {"decision": "DENY"}}
+{"id": "circuit_break_rate", "action": {"type": "api_call", "endpoint": "/internal"}, "metadata": {"api_rate_limit_pct": 99}, "expect": {"decision": "CIRCUIT_BREAK"}}

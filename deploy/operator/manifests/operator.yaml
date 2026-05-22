@@ -1,0 +1,165 @@
+---
+# Namespace
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: haltchain-system
+  labels:
+    app.kubernetes.io/managed-by: haltchain-operator
+---
+# ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: haltchain-operator
+  namespace: haltchain-system
+---
+# ClusterRole — operator needs full access to HaltChain CRDs and read access to pods/configmaps
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: haltchain-operator
+rules:
+  - apiGroups: [haltchain.io]
+    resources: [policysets, agentprofiles, auditsinks]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [haltchain.io]
+    resources: [policysets/status, agentprofiles/status, auditsinks/status]
+    verbs: [get, update, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: haltchain-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: haltchain-operator
+subjects:
+  - kind: ServiceAccount
+    name: haltchain-operator
+    namespace: haltchain-system
+---
+# Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: haltchain-operator
+  namespace: haltchain-system
+  labels:
+    app: haltchain-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: haltchain-operator
+  template:
+    metadata:
+      labels:
+        app: haltchain-operator
+    spec:
+      serviceAccountName: haltchain-operator
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: operator
+          image: ghcr.io/haltchain/operator:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: HALTCHAIN_WEBHOOK_TLS_CERT
+              value: /etc/haltchain/webhook/tls.crt
+            - name: HALTCHAIN_WEBHOOK_TLS_KEY
+              value: /etc/haltchain/webhook/tls.key
+          ports:
+            - containerPort: 8443
+              name: webhook
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /etc/haltchain/webhook
+              readOnly: true
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 64Mi
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: haltchain-operator-webhook-tls
+---
+# Service for the admission webhook (must be reachable from the API server)
+apiVersion: v1
+kind: Service
+metadata:
+  name: haltchain-operator-webhook
+  namespace: haltchain-system
+spec:
+  selector:
+    app: haltchain-operator
+  ports:
+    - port: 443
+      targetPort: 8443
+      name: webhook
+---
+# MutatingWebhookConfiguration — intercepts pod creation/updates to inject sidecar
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: haltchain-sidecar-injector
+webhooks:
+  - name: sidecar-injector.haltchain.io
+    admissionReviewVersions: [v1]
+    clientConfig:
+      service:
+        name: haltchain-operator-webhook
+        namespace: haltchain-system
+        path: /mutate-pods
+      # caBundle is injected by cert-manager or manually.
+      # caBundle: <base64-encoded-CA-cert>
+    rules:
+      - apiGroups: [""]
+        apiVersions: [v1]
+        resources: [pods]
+        operations: [CREATE, UPDATE]
+    failurePolicy: Ignore
+    namespaceSelector:
+      matchLabels:
+        haltchain.io/inject: enabled
+    sideEffects: None
+    timeoutSeconds: 10

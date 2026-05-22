@@ -4,10 +4,30 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tokio    = { workspace = true }
-serde    = { workspace = true }
-serde_json = { workspace = true }
-chrono   = { workspace = true }
-thiserror = { workspace = true }
-uuid     = { workspace = true }
-haltchain-policy = { path = "../policy" }
+tokio             = { workspace = true }
+serde             = { workspace = true }
+serde_json        = { workspace = true }
+chrono            = { workspace = true }
+thiserror         = { workspace = true }
+uuid              = { workspace = true }
+haltchain-policy  = { path = "../policy" }
+haltchain-analytics = { path = "../analytics" }
+haltchain-cache   = { path = "../cache" }
+haltchain-consensus  = { path = "../consensus" }
+haltchain-rules      = { path = "../rules" }
+haltchain-embeddings = { path = "../embeddings" }
+haltchain-cognitive  = { path = "../cognitive" }
+haltchain-capability = { path = "../capability" }
+haltchain-queue      = { path = "../queue" }
+haltchain-signing    = { path = "../signing" }
+haltchain-merkle     = { path = "../merkle" }
+haltchain-db         = { path = "../db" }
+haltchain-mcp-guard  = { path = "../mcp-guard" }
+haltchain-anchor     = { path = "../anchor" }
+parking_lot          = { workspace = true }
+dashmap              = { workspace = true }
+regex                = { workspace = true }
+base64               = { workspace = true }
+hmac                 = { workspace = true }
+sha2                 = { workspace = true }
+tracing              = { workspace = true }

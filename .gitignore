@@ -24,19 +24,75 @@
 /sdk/python/.venv/*
 venv/
 .venv/
+.venv-ci/
 env/
 __pycache__/
 *.py[cod]
 .pytest_cache/
 
+# ONNX / local model weights (use scripts/download_arctic_onnx.sh)
+/models/
+
 # Packaging/build
 /dist/
 /build/
+sdk/python/dist/
+sdk/python/build/
 
-# Environment files
+# Environment files - all variants
 .env
-.env.local
+.env.*
+!.env.example
+
+# Secrets and credentials
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+credentials/
+*.secret
+config/secrets*
 
 # Misc
 /tmp/
 .copilot/
+
+# Markdown files - ignore all except README.md
+*.md
+!README.md
+**/examples/
+
+#frontend
+frontend/node_modules/
+frontend/.next/
+frontend/dist/
+frontend/.env*
+!frontend/.env.example
+
+# Package manager lock files (uncomment if you don't want to track these)
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Backup files
+*.bak
+*.backup
+
+# Database migrations (uncomment if schema should not be public)
+# migrations/
+# **/migrations/
+
+/*.sh
+*.sh
+
+sdk/typescript/node_modules/
+scripts/
+
+Documents/*

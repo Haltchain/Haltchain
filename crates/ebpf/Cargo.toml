@@ -1,0 +1,22 @@
+[package]
+name = "haltchain-ebpf"
+version = "0.1.0"
+edition = "2024"
+description = "Phase 2: eBPF syscall interception via aya-rs (runtime-gated; requires Linux kernel 5.8+)"
+
+# aya and aya-log are Linux-only; gate them so the crate still compiles on macOS/Windows in CI.
+# When building for production Linux targets, enable the 'kernel' feature.
+[features]
+default = []
+kernel = ["dep:aya", "dep:aya-log"]
+
+[dependencies]
+tokio = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aya = { version = "0.13", optional = true }
+aya-log = { version = "0.2", optional = true }

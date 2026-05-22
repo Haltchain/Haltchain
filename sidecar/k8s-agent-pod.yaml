@@ -1,0 +1,90 @@
+# HaltChain sidecar — inject into any agent pod for zero-code validation.
+#
+# The guard container listens on localhost:8787.  The main agent sets
+# HALTCHAIN_BASE_URL=http://localhost:8787 (or uses the SDK default).
+# No network hop leaves the pod, so latency is sub-millisecond.
+#
+# Build the sidecar image:
+#   docker build -f sidecar/Dockerfile -t haltchain-sidecar:latest .
+
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-agent
+  labels:
+    app: my-agent
+spec:
+  volumes:
+    # Mount a K8s Secret as env vars for both containers.
+    - name: haltchain-secrets
+      secret:
+        secretName: haltchain-sidecar-secrets
+
+  containers:
+    # ── 1. Your agent ────────────────────────────────────────────────────────
+    - name: agent
+      image: my-agent:latest
+      env:
+        - name: HALTCHAIN_BASE_URL
+          value: "http://localhost:8787"
+        - name: HALTCHAIN_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: haltchain-sidecar-secrets
+              key: api-key
+
+    # ── 2. HaltChain guard sidecar ───────────────────────────────────────────
+    - name: haltchain-guard
+      image: haltchain-sidecar:latest
+      ports:
+        - containerPort: 8787
+          protocol: TCP
+      env:
+        - name: PORT
+          value: "8787"
+        - name: HALTCHAIN_API_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: haltchain-sidecar-secrets
+              key: api-key
+        - name: HALTCHAIN_ADMIN_KEYS
+          valueFrom:
+            secretKeyRef:
+              name: haltchain-sidecar-secrets
+              key: admin-key
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: haltchain-sidecar-secrets
+              key: jwt-secret
+      resources:
+        requests:
+          memory: "64Mi"
+          cpu: "50m"
+        limits:
+          memory: "256Mi"
+          cpu: "500m"
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 8787
+        initialDelaySeconds: 5
+        periodSeconds: 10
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8787
+        initialDelaySeconds: 10
+        periodSeconds: 30
+
+---
+# Secret template — populate with real values before applying.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: haltchain-sidecar-secrets
+type: Opaque
+stringData:
+  api-key: "REPLACE_WITH_API_KEY"
+  admin-key: "REPLACE_WITH_ADMIN_KEY"
+  jwt-secret: "REPLACE_WITH_JWT_SECRET"

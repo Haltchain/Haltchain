@@ -1,0 +1,65 @@
+version: "3.8"
+
+# Use this file with: docker-compose -f docker-compose.supabase.yml up -d
+# This version connects to external Supabase PostgreSQL (no local postgres service)
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: haltchain-frontend:dev
+    container_name: haltchain-frontend
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    depends_on:
+      - api
+    env_file:
+      - .env.docker
+    environment:
+      HALTCHAIN_API_URL: http://api:8080
+      FRONTEND_PORT: 3000
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: haltchain-api:dev
+    container_name: haltchain-dev
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    depends_on:
+      - redis
+    env_file:
+      - .env.docker
+    environment:
+      RUST_LOG: info
+      # DATABASE_URL is loaded from .env.docker (pointing to Supabase)
+      # HALTCHAIN_ADMIN_KEYS is loaded from .env.docker
+      HALTCHAIN_DB_REQUIRE_SSL: ${HALTCHAIN_DB_REQUIRE_SSL:-true}
+      HALTCHAIN_DB_MAX_CONNECTIONS: ${HALTCHAIN_DB_MAX_CONNECTIONS:-10}
+      HALTCHAIN_DB_MIN_CONNECTIONS: ${HALTCHAIN_DB_MIN_CONNECTIONS:-2}
+      HALTCHAIN_DB_CONNECT_TIMEOUT_SECS: ${HALTCHAIN_DB_CONNECT_TIMEOUT_SECS:-5}
+      HALTCHAIN_DB_ACQUIRE_TIMEOUT_SECS: ${HALTCHAIN_DB_ACQUIRE_TIMEOUT_SECS:-5}
+      HALTCHAIN_DB_IDLE_TIMEOUT_SECS: ${HALTCHAIN_DB_IDLE_TIMEOUT_SECS:-300}
+      HALTCHAIN_DB_MAX_LIFETIME_SECS: ${HALTCHAIN_DB_MAX_LIFETIME_SECS:-1800}
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'cat < /dev/tcp/127.0.0.1/8080 >/dev/null 2>&1'"]
+      interval: 10s
+      timeout: 2s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: haltchain-redis
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
