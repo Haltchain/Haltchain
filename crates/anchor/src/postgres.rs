@@ -23,6 +23,7 @@ impl Anchor for PostgresAnchor {
         let tx_id = Uuid::parse_str(d.transaction_id).unwrap_or_else(|_| Uuid::new_v4());
         let record = DecisionRecord {
             transaction_id: tx_id,
+            org_id: None,
             agent_id: d.agent_id.to_string(),
             decision: d.decision.to_string(),
             domain: None,
@@ -33,6 +34,9 @@ impl Anchor for PostgresAnchor {
             sig_b64: None,
             request_nonce: None,
             request_sig: None,
+            decided_at: chrono::DateTime::parse_from_rfc3339(d.timestamp)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc)),
         };
         let row_id = self
             .db
