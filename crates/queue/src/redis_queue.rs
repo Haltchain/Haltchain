@@ -3,7 +3,10 @@ use async_trait::async_trait;
 use redis::AsyncCommands;
 use serde_json;
 
-use crate::{DeadLetterTask, DeepScanTask, QueueError, QueueId, QueueMetrics, QueuePriority, ScanQueue, ScanResult};
+use crate::{
+    DeadLetterTask, DeepScanTask, QueueError, QueueId, QueueMetrics, QueuePriority, ScanQueue,
+    ScanResult,
+};
 
 const QUEUE_KEY_HIGH: &str = "haltchain:scan_queue:high";
 const QUEUE_KEY_NORMAL: &str = "haltchain:scan_queue:normal";
@@ -131,7 +134,11 @@ impl ScanQueue for RedisScanQueue {
         payload.and_then(|p| serde_json::from_str(&p).ok())
     }
 
-    async fn retry_or_dead_letter(&self, mut task: DeepScanTask, reason: String) -> Result<(), QueueError> {
+    async fn retry_or_dead_letter(
+        &self,
+        mut task: DeepScanTask,
+        reason: String,
+    ) -> Result<(), QueueError> {
         if task.attempts.saturating_add(1) > task.max_attempts {
             return self.put_dead_letter(task, reason).await;
         }

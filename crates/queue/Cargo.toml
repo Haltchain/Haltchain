@@ -3,11 +3,17 @@ name = "haltchain-queue"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+redis-queue = ["redis", "serde_json"]
+
 [dependencies]
 async-trait = { workspace = true }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 uuid = { workspace = true, features = ["serde"] }
+redis = { version = "0.28", features = ["aio", "tokio-comp"], optional = true }
