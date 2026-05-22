@@ -68,7 +68,7 @@ export async function verifyResponse(
     transaction_id: string;
     decision: string;
     timestamp: string;
-    sig?: Record<string, string>;
+    sig?: { nonce: string; signed_at: string; signature: string; key_id?: string };
   },
   agentId: string,
   publicKeyB64: string,
@@ -80,7 +80,7 @@ export async function verifyResponse(
     const keyBytes = base64Decode(publicKeyB64);
     const key = await crypto.subtle.importKey(
       "raw",
-      keyBytes,
+      keyBytes as unknown as ArrayBuffer,
       { name: "Ed25519" },
       false,
       ["verify"],
@@ -95,7 +95,7 @@ export async function verifyResponse(
     const message = buildVerifyMessage(payload, sig.nonce, sig.signed_at);
     const sigBytes = base64Decode(sig.signature);
 
-    return await crypto.subtle.verify("Ed25519", key, sigBytes, message);
+    return await crypto.subtle.verify("Ed25519", key, sigBytes as unknown as ArrayBuffer, message as unknown as ArrayBuffer);
   } catch {
     // Ed25519 not supported on this platform, or malformed data.
     return false;

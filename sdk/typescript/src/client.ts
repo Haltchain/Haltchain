@@ -29,15 +29,27 @@ export class HaltChainClient {
 
   async check(
     action: Record<string, unknown>,
-    options?: { sessionId?: string; context?: Record<string, unknown> },
+    options?: {
+      sessionId?: string;
+      context?: Record<string, unknown>;
+      /** Trace ID for cross-agent audit correlation. Added to request metadata. */
+      traceId?: string;
+    },
   ): Promise<ValidationResponse> {
     const [nonce, timestamp, sig] = await signRequest(this.agentId, this.apiKey);
+
+    // Merge traceId into metadata so the validator and downstream agents
+    // can correlate audit events across agent boundaries.
+    const metadata: Record<string, unknown> = { ...(options?.context ?? {}) };
+    if (options?.traceId) {
+      metadata["haltchain_trace_id"] = options.traceId;
+    }
 
     const body = {
       agent_id: this.agentId,
       action,
       session_id: options?.sessionId,
-      context: options?.context,
+      metadata,
       request_nonce: nonce,
       request_timestamp: timestamp,
       request_sig: sig,
