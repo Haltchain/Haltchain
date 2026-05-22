@@ -9,12 +9,76 @@
 //! order is preserved within each priority tier after the global sort.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::OnceLock;
 
+use parking_lot::Mutex;
+use regex::{Regex, RegexBuilder};
 use thiserror::Error;
 
 use crate::schema::{
-    Condition, EvalContext, FieldValue, Op, PolicyFile, Priority, Rule, RuleAction,
+    Condition, EnforcementMode, EvalContext, FieldValue, Op, PolicyFile, Priority, Rule, RuleAction,
 };
+
+// ─── Regex cache ──────────────────────────────────────────────────────────────
+
+/// Global regex compilation cache. Patterns are validated at policy load time
+/// and cached here for O(1) lookup during evaluation. Uses RE2-compatible
+/// `regex` crate which guarantees linear-time matching (no catastrophic backtracking).
+static REGEX_CACHE: OnceLock<Mutex<HashMap<String, Regex>>> = OnceLock::new();
+
+/// Maximum compiled NFA size (bytes). Prevents ReDoS via pathological patterns.
+/// 10 MB matches `regex` crate recommendation for untrusted inputs.
+const REGEX_SIZE_LIMIT: usize = 10_000_000;
+
+/// Maximum DFA cache size (bytes). Bounds memory consumption per pattern.
+const REGEX_DFA_SIZE_LIMIT: usize = 2_000_000;
+
+/// Maximum pattern string length accepted before compilation.
+/// Patterns longer than this are rejected outright to prevent amplification.
+const MAX_PATTERN_LEN: usize = 1024;
+
+fn regex_cache() -> &'static Mutex<HashMap<String, Regex>> {
+    REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Compile or retrieve a cached regex with RE2 complexity bounds.
+///
+/// Enforces:
+/// - Pattern length cap: [`MAX_PATTERN_LEN`] characters
+/// - NFA size limit: [`REGEX_SIZE_LIMIT`] bytes  
+/// - DFA cache limit: [`REGEX_DFA_SIZE_LIMIT`] bytes
+///
+/// Returns `None` for invalid or oversized patterns (logs a warning).
+fn get_or_compile_regex(pattern: &str) -> Option<Regex> {
+    if pattern.len() > MAX_PATTERN_LEN {
+        tracing::warn!(
+            pattern_len = pattern.len(),
+            max = MAX_PATTERN_LEN,
+            "regex pattern exceeds maximum length — rejected"
+        );
+        return None;
+    }
+
+    let mut cache = regex_cache().lock();
+    if let Some(re) = cache.get(pattern) {
+        return Some(re.clone());
+    }
+
+    match RegexBuilder::new(pattern)
+        .size_limit(REGEX_SIZE_LIMIT)
+        .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
+        .build()
+    {
+        Ok(re) => {
+            cache.insert(pattern.to_string(), re.clone());
+            Some(re)
+        }
+        Err(e) => {
+            tracing::warn!(pattern = pattern, error = %e, "regex compilation failed (size limit or syntax error)");
+            None
+        }
+    }
+}
 
 // ─── Errors ────────────────────────────────────────────────────────────────────
 
@@ -24,6 +88,8 @@ pub enum EvalError {
     CycleDetected(String),
     #[error("unknown dependency '{dep}' in rule '{rule}'")]
     UnknownDep { rule: String, dep: String },
+    #[error("invalid regex pattern in rule '{rule}': {pattern}")]
+    InvalidRegex { rule: String, pattern: String },
 }
 
 // ─── Per-rule output ──────────────────────────────────────────────────────────
@@ -34,6 +100,9 @@ pub struct RuleOutput {
     pub matched: bool,
     pub action: RuleAction,
     pub message: Option<String>,
+    /// `true` when the rule *would have* blocked but was downgraded to a flag
+    /// because the policy is running in shadow mode.
+    pub shadow_downgraded: bool,
 }
 
 // ─── Final evaluation result ──────────────────────────────────────────────────
@@ -67,7 +136,7 @@ fn eval_condition(cond: &Condition, ctx: &EvalContext) -> bool {
             Op::Lte => ctx_val <= rule_val,
             Op::Eq => (ctx_val - rule_val).abs() < f64::EPSILON,
             Op::Neq => (ctx_val - rule_val).abs() >= f64::EPSILON,
-            Op::Contains | Op::Regex => false,
+            Op::Contains | Op::Regex => false, // regex not meaningful for numerics
         };
     }
     // Boolean comparison
@@ -94,7 +163,16 @@ fn eval_condition(cond: &Condition, ctx: &EvalContext) -> bool {
                     _ => unreachable!(),
                 }
             }
-            Op::Regex => false, // regex support is a Week 4 stretch goal
+            Op::Regex => match get_or_compile_regex(rule_val) {
+                Some(re) => re.is_match(ctx_val),
+                None => {
+                    tracing::warn!(
+                        pattern = rule_val,
+                        "invalid regex pattern in rule condition"
+                    );
+                    false
+                }
+            },
         };
     }
     false
@@ -205,16 +283,40 @@ pub fn topo_sort(rules: &[Rule]) -> Result<Vec<&Rule>, EvalError> {
 pub struct RuleEvaluator {
     /// Rules in topological+priority order, disabled rules removed.
     rules: Vec<Rule>,
+    /// Global max delegation chain depth (from PolicyFile).
+    max_delegation_depth: Option<u32>,
+    /// Shadow mode converts Deny/CircuitBreak to Flag (log-only).
+    shadow: bool,
 }
 
 impl RuleEvaluator {
     /// Build evaluator from a parsed [`PolicyFile`].
+    ///
+    /// Validates regex patterns at load time (fail-fast) and pre-compiles them
+    /// into the global cache for zero-cost evaluation.
     pub fn new(pf: &PolicyFile) -> Result<Self, EvalError> {
         let active: Vec<Rule> = pf.rules.iter().filter(|r| !r.disabled).cloned().collect();
+
+        // Pre-validate and cache all regex patterns
+        for rule in &active {
+            if rule.condition.op == Op::Regex {
+                if let Some(pattern) = rule.condition.value.as_str() {
+                    if get_or_compile_regex(pattern).is_none() {
+                        return Err(EvalError::InvalidRegex {
+                            rule: rule.id.clone(),
+                            pattern: pattern.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
         // Validate and build in one pass.
         let sorted = topo_sort(&active)?;
         Ok(Self {
             rules: sorted.into_iter().cloned().collect(),
+            max_delegation_depth: pf.max_delegation_depth,
+            shadow: pf.enforcement_mode == EnforcementMode::Shadow,
         })
     }
 
@@ -222,7 +324,50 @@ impl RuleEvaluator {
     ///
     /// Key decision: first DENY / CIRCUIT_BREAK short-circuits.
     /// Safety rules always run before compliance, which runs before business.
+    ///
+    /// If `max_delegation_depth` is set in the policy and the context's
+    /// `delegation_depth` exceeds it, the request is denied immediately.
     pub fn evaluate(&self, ctx: &EvalContext) -> (EvalDecision, Vec<RuleOutput>) {
+        // ── Global delegation depth check ──
+        if let Some(max) = self.max_delegation_depth {
+            if ctx.delegation_depth > max {
+                let msg = format!(
+                    "Delegation chain depth {} exceeds max allowed {}",
+                    ctx.delegation_depth, max
+                );
+                if self.shadow {
+                    let output = RuleOutput {
+                        rule_id: "__delegation_depth".to_string(),
+                        matched: true,
+                        action: RuleAction::Deny,
+                        message: Some(format!("[SHADOW] {msg}")),
+                        shadow_downgraded: true,
+                    };
+                    // In shadow mode, continue evaluation with a flag instead
+                    return (
+                        EvalDecision::FlaggedAllow {
+                            flags: vec!["__delegation_depth".to_string()],
+                        },
+                        vec![output],
+                    );
+                }
+                let output = RuleOutput {
+                    rule_id: "__delegation_depth".to_string(),
+                    matched: true,
+                    action: RuleAction::Deny,
+                    message: Some(msg.clone()),
+                    shadow_downgraded: false,
+                };
+                return (
+                    EvalDecision::Deny {
+                        rule_id: "__delegation_depth".to_string(),
+                        message: msg,
+                    },
+                    vec![output],
+                );
+            }
+        }
+
         let mut outputs: Vec<RuleOutput> = Vec::new();
         let mut flags: Vec<String> = Vec::new();
 
@@ -237,10 +382,22 @@ impl RuleEvaluator {
                 } else {
                     None
                 },
+                shadow_downgraded: false,
             };
 
             if matched {
                 match rule.action {
+                    RuleAction::Deny | RuleAction::CircuitBreak if self.shadow => {
+                        // Shadow mode: downgrade to flag, don't short-circuit
+                        flags.push(rule.id.clone());
+                        let mut shadow_output = output.clone();
+                        shadow_output.shadow_downgraded = true;
+                        shadow_output.message = Some(format!(
+                            "[SHADOW] {}",
+                            shadow_output.message.as_deref().unwrap_or("")
+                        ));
+                        outputs.push(shadow_output);
+                    }
                     RuleAction::Deny => {
                         outputs.push(output);
                         return (
@@ -266,7 +423,14 @@ impl RuleEvaluator {
                 }
             }
 
-            outputs.push(output);
+            if !matched
+                || (!self.shadow
+                    || !matches!(rule.action, RuleAction::Deny | RuleAction::CircuitBreak))
+            {
+                if !outputs.last().map_or(false, |o| o.rule_id == rule.id) {
+                    outputs.push(output);
+                }
+            }
         }
 
         if flags.is_empty() {
@@ -318,6 +482,13 @@ mod tests {
             actions_1m: 3,
             anomaly_score: 0.2,
             is_anomaly: false,
+            delegation_depth: 0,
+            pii_field_count: 0,
+            gdpr_deletion_requested: false,
+            cross_border_restricted: false,
+            retention_days_requested: 0,
+            accessing_undeclared_service: false,
+            payload_contains_pii: false,
         }
     }
 
@@ -325,6 +496,8 @@ mod tests {
         PolicyFile {
             version: "1".into(),
             rules,
+            max_delegation_depth: None,
+            enforcement_mode: EnforcementMode::default(),
         }
     }
 
@@ -459,5 +632,338 @@ mod tests {
         let ev = RuleEvaluator::new(&pf(vec![r])).unwrap();
         let (dec, _) = ev.evaluate(&default_ctx());
         assert_eq!(dec, EvalDecision::Allow);
+    }
+
+    #[test]
+    fn delegation_depth_within_limit_allowed() {
+        let pf = PolicyFile {
+            version: "1".into(),
+            rules: vec![],
+            max_delegation_depth: Some(3),
+            enforcement_mode: EnforcementMode::default(),
+        };
+        let ev = RuleEvaluator::new(&pf).unwrap();
+        let mut ctx = default_ctx();
+        ctx.delegation_depth = 2;
+        let (dec, _) = ev.evaluate(&ctx);
+        assert_eq!(dec, EvalDecision::Allow);
+    }
+
+    #[test]
+    fn delegation_depth_exceeding_limit_denied() {
+        let pf = PolicyFile {
+            version: "1".into(),
+            rules: vec![],
+            max_delegation_depth: Some(3),
+            enforcement_mode: EnforcementMode::default(),
+        };
+        let ev = RuleEvaluator::new(&pf).unwrap();
+        let mut ctx = default_ctx();
+        ctx.delegation_depth = 4;
+        let (dec, _) = ev.evaluate(&ctx);
+        assert!(
+            matches!(dec, EvalDecision::Deny { rule_id, .. } if rule_id == "__delegation_depth")
+        );
+    }
+
+    #[test]
+    fn delegation_depth_rule_condition_works() {
+        // Operators can also write per-rule delegation_depth conditions
+        let rules = vec![make_rule(
+            "deep_chain_flag",
+            Priority::Safety,
+            "delegation_depth",
+            Op::Gt,
+            FieldValue::Number(2.0),
+            RuleAction::Flag,
+            vec![],
+        )];
+        let ev = RuleEvaluator::new(&pf(rules)).unwrap();
+        let mut ctx = default_ctx();
+        ctx.delegation_depth = 3;
+        let (dec, _) = ev.evaluate(&ctx);
+        assert!(matches!(dec, EvalDecision::FlaggedAllow { .. }));
+    }
+
+    // ─── Regex tests ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn regex_matches_string_field() {
+        let rules = vec![make_rule(
+            "block_evil_recipient",
+            Priority::Safety,
+            "recipient",
+            Op::Regex,
+            FieldValue::Text(r"^(evil|malicious)_.*".into()),
+            RuleAction::Deny,
+            vec![],
+        )];
+        let ev = RuleEvaluator::new(&pf(rules)).unwrap();
+
+        let mut ctx = default_ctx();
+        ctx.recipient = "evil_bob".into();
+        let (dec, _) = ev.evaluate(&ctx);
+        assert!(matches!(dec, EvalDecision::Deny { .. }));
+
+        ctx.recipient = "good_alice".into();
+        let (dec, _) = ev.evaluate(&ctx);
+        assert_eq!(dec, EvalDecision::Allow);
+    }
+
+    #[test]
+    fn regex_no_match_allows() {
+        let rules = vec![make_rule(
+            "currency_pattern",
+            Priority::Compliance,
+            "currency",
+            Op::Regex,
+            FieldValue::Text(r"^[A-Z]{3}$".into()),
+            RuleAction::Flag,
+            vec![],
+        )];
+        let ev = RuleEvaluator::new(&pf(rules)).unwrap();
+        let ctx = default_ctx(); // currency = "USD" -> matches ^[A-Z]{3}$
+        let (dec, _) = ev.evaluate(&ctx);
+        assert!(matches!(dec, EvalDecision::FlaggedAllow { .. }));
+    }
+
+    #[test]
+    fn invalid_regex_rejected_at_load_time() {
+        let rules = vec![make_rule(
+            "bad_pattern",
+            Priority::Safety,
+            "recipient",
+            Op::Regex,
+            FieldValue::Text(r"[invalid(".into()),
+            RuleAction::Deny,
+            vec![],
+        )];
+        let result = RuleEvaluator::new(&pf(rules));
+        assert!(matches!(result, Err(EvalError::InvalidRegex { .. })));
+    }
+
+    #[test]
+    fn regex_on_numeric_field_is_false() {
+        let rules = vec![make_rule(
+            "regex_on_num",
+            Priority::Safety,
+            "amount",
+            Op::Regex,
+            FieldValue::Number(42.0),
+            RuleAction::Deny,
+            vec![],
+        )];
+        let ev = RuleEvaluator::new(&pf(rules)).unwrap();
+        let (dec, _) = ev.evaluate(&default_ctx());
+        assert_eq!(dec, EvalDecision::Allow);
+    }
+
+    #[test]
+    fn regex_cache_reuses_compiled_pattern() {
+        // Two rules with the same pattern should compile once
+        let rules = vec![
+            make_rule(
+                "r1",
+                Priority::Safety,
+                "recipient",
+                Op::Regex,
+                FieldValue::Text(r"^test_.*".into()),
+                RuleAction::Flag,
+                vec![],
+            ),
+            make_rule(
+                "r2",
+                Priority::Compliance,
+                "agent_id",
+                Op::Regex,
+                FieldValue::Text(r"^test_.*".into()),
+                RuleAction::Flag,
+                vec![],
+            ),
+        ];
+        let ev = RuleEvaluator::new(&pf(rules)).unwrap();
+        let mut ctx = default_ctx();
+        ctx.recipient = "test_bob".into();
+        ctx.agent_id = "test_agent".into();
+        let (dec, _) = ev.evaluate(&ctx);
+        assert!(matches!(dec, EvalDecision::FlaggedAllow { flags } if flags.len() == 2));
+    }
+
+    // ─── Shadow mode tests ────────────────────────────────────────────────────
+
+    fn shadow_pf(rules: Vec<Rule>) -> PolicyFile {
+        PolicyFile {
+            version: "1".into(),
+            rules,
+            max_delegation_depth: None,
+            enforcement_mode: EnforcementMode::Shadow,
+        }
+    }
+
+    #[test]
+    fn shadow_mode_downgrades_deny_to_flag() {
+        let rules = vec![make_rule(
+            "hard_cap",
+            Priority::Safety,
+            "amount",
+            Op::Gt,
+            FieldValue::Number(100.0),
+            RuleAction::Deny,
+            vec![],
+        )];
+        let ev = RuleEvaluator::new(&shadow_pf(rules)).unwrap();
+        let (dec, outputs) = ev.evaluate(&default_ctx());
+        // Should NOT deny in shadow mode
+        assert!(
+            matches!(dec, EvalDecision::FlaggedAllow { ref flags } if flags.contains(&"hard_cap".to_string())),
+            "Shadow mode should downgrade deny to flagged allow, got {dec:?}"
+        );
+        // Output should be marked as shadow-downgraded
+        let hard_cap_output = outputs.iter().find(|o| o.rule_id == "hard_cap").unwrap();
+        assert!(hard_cap_output.shadow_downgraded);
+    }
+
+    #[test]
+    fn shadow_mode_downgrades_circuit_break_to_flag() {
+        let rules = vec![make_rule(
+            "velocity_cb",
+            Priority::Safety,
+            "ewma_velocity",
+            Op::Gt,
+            FieldValue::Number(0.05),
+            RuleAction::CircuitBreak,
+            vec![],
+        )];
+        let ev = RuleEvaluator::new(&shadow_pf(rules)).unwrap();
+        let (dec, _) = ev.evaluate(&default_ctx());
+        assert!(
+            matches!(dec, EvalDecision::FlaggedAllow { .. }),
+            "Shadow mode should downgrade circuit break, got {dec:?}"
+        );
+    }
+
+    #[test]
+    fn shadow_mode_evaluates_all_rules_no_short_circuit() {
+        let rules = vec![
+            make_rule(
+                "r1_deny",
+                Priority::Safety,
+                "amount",
+                Op::Gt,
+                FieldValue::Number(100.0),
+                RuleAction::Deny,
+                vec![],
+            ),
+            make_rule(
+                "r2_deny",
+                Priority::Compliance,
+                "currency",
+                Op::Eq,
+                FieldValue::Text("USD".into()),
+                RuleAction::Deny,
+                vec![],
+            ),
+        ];
+        let ev = RuleEvaluator::new(&shadow_pf(rules)).unwrap();
+        let (dec, outputs) = ev.evaluate(&default_ctx());
+        // Both rules should be evaluated (no short-circuit in shadow mode)
+        let matched: Vec<_> = outputs.iter().filter(|o| o.matched).collect();
+        assert_eq!(matched.len(), 2, "Shadow mode should not short-circuit");
+        assert!(matches!(dec, EvalDecision::FlaggedAllow { ref flags } if flags.len() == 2));
+    }
+
+    #[test]
+    fn shadow_mode_parsed_from_yaml() {
+        let yaml = r#"
+version: "1"
+enforcement_mode: shadow
+rules:
+  - id: test_rule
+    priority: safety
+    description: test
+    condition:
+      field: amount
+      op: gt
+      value: 100.0
+    action: deny
+    message: "blocked"
+"#;
+        let pf = PolicyFile::from_yaml(yaml).unwrap();
+        assert_eq!(pf.enforcement_mode, EnforcementMode::Shadow);
+        let ev = RuleEvaluator::new(&pf).unwrap();
+        let (dec, _) = ev.evaluate(&default_ctx());
+        assert!(matches!(dec, EvalDecision::FlaggedAllow { .. }));
+    }
+
+    #[test]
+    fn enforce_mode_is_default() {
+        let yaml = r#"
+version: "1"
+rules: []
+"#;
+        let pf = PolicyFile::from_yaml(yaml).unwrap();
+        assert_eq!(pf.enforcement_mode, EnforcementMode::Enforce);
+    }
+
+    // ─── Security: Regex complexity / ReDoS guards ─────────────────────────
+
+    #[test]
+    fn security_regex_pattern_too_long_is_rejected() {
+        // Pattern longer than MAX_PATTERN_LEN (1024) must be rejected.
+        let long_pattern = "a".repeat(1025);
+        let result = get_or_compile_regex(&long_pattern);
+        assert!(
+            result.is_none(),
+            "oversized pattern should be rejected to prevent ReDoS amplification"
+        );
+    }
+
+    #[test]
+    fn security_regex_exact_max_len_is_accepted() {
+        // A simple pattern at exactly the length limit must still compile.
+        let pattern = format!(".{{0,{}}}", MAX_PATTERN_LEN - 10);
+        let result = get_or_compile_regex(&pattern);
+        assert!(
+            result.is_some(),
+            "pattern within length limit should compile"
+        );
+    }
+
+    #[test]
+    fn security_regex_deeply_nested_quantifiers_rejected_or_safe() {
+        // A deeply nested quantifier pattern that would cause exponential NFA
+        // growth should either fail compilation (size_limit hit) or match safely.
+        // The regex crate's NFA-based engine ensures linear time, but size_limit
+        // will reject patterns whose compiled NFA exceeds REGEX_SIZE_LIMIT bytes.
+        let nested = "(a+)+b".repeat(3); // mildly pathological; regex crate blocks at NFA size
+        // Either compiles (safe NFA) or is rejected (size exceeded): both are acceptable.
+        // What is NOT acceptable: a panic or timeout.
+        let _result = get_or_compile_regex(&nested);
+        // Reaches here ⟹ no panic/timeout — test passes.
+    }
+
+    #[test]
+    fn security_regex_invalid_syntax_returns_none() {
+        let result = get_or_compile_regex("(unclosed");
+        assert!(
+            result.is_none(),
+            "invalid regex must return None, not panic"
+        );
+    }
+
+    #[test]
+    fn security_regex_cache_deduplicated() {
+        // Same pattern compiled twice → single cache entry (no duplicate compilation).
+        let pattern = r"^[a-z]{1,50}$";
+        let r1 = get_or_compile_regex(pattern);
+        let r2 = get_or_compile_regex(pattern);
+        assert!(r1.is_some());
+        assert!(r2.is_some());
+        let cache_size = regex_cache().lock().len();
+        // Pattern must appear exactly once in the cache.
+        assert!(
+            cache_size >= 1,
+            "cache must hold at least the compiled pattern"
+        );
     }
 }

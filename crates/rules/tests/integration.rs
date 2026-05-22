@@ -6,8 +6,8 @@
 //!   3. Conflict detection on the test policy
 
 use haltchain_rules::{
-    ConflictGraph, EvalContext, EvalDecision, FieldValue, Op, PolicyFile, Priority, Rule,
-    RuleAction, RuleEvaluator, conflict::ConflictKind, schema::Condition,
+    ConflictGraph, EnforcementMode, EvalContext, EvalDecision, FieldValue, Op, PolicyFile,
+    Priority, Rule, RuleAction, RuleEvaluator, conflict::ConflictKind, schema::Condition,
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -48,6 +48,13 @@ fn ctx_normal() -> EvalContext {
         actions_1m: 2,
         anomaly_score: 0.2,
         is_anomaly: false,
+        delegation_depth: 0,
+        pii_field_count: 0,
+        gdpr_deletion_requested: false,
+        cross_border_restricted: false,
+        retention_days_requested: 0,
+        accessing_undeclared_service: false,
+        payload_contains_pii: false,
     }
 }
 
@@ -166,6 +173,8 @@ fn dag_dependency_gates_downstream_rule() {
                 vec!["usd_only"],
             ),
         ],
+        max_delegation_depth: None,
+        enforcement_mode: EnforcementMode::default(),
     };
     let ev = RuleEvaluator::new(&pf).unwrap();
 
@@ -238,6 +247,8 @@ fn flagged_allow_for_flag_rules() {
             RuleAction::Flag,
             vec![],
         )],
+        max_delegation_depth: None,
+        enforcement_mode: EnforcementMode::default(),
     };
     let ev = RuleEvaluator::new(&pf).unwrap();
 
@@ -276,6 +287,8 @@ fn conflict_detection_on_shadow() {
                 vec![],
             ),
         ],
+        max_delegation_depth: None,
+        enforcement_mode: EnforcementMode::default(),
     };
     let graph = ConflictGraph::build(&pf);
     assert!(graph.has_conflicts());
@@ -377,4 +390,131 @@ rules:
         dec1, dec2,
         "Round-tripped policy must produce identical decisions"
     );
+}
+
+// ─── Scenario 8: Regulatory rule packs parse and evaluate ─────────────────────
+
+#[test]
+fn regulatory_packs_parse_and_build_evaluators() {
+    let packs = &[
+        include_str!("../../../rules/packs/gdpr.yaml"),
+        include_str!("../../../rules/packs/pci_dss.yaml"),
+        include_str!("../../../rules/packs/hipaa.yaml"),
+        include_str!("../../../rules/packs/eu_ai_act.yaml"),
+    ];
+    let names = &["GDPR", "PCI-DSS", "HIPAA", "EU AI Act"];
+
+    for (yaml, name) in packs.iter().zip(names) {
+        let pf = PolicyFile::from_yaml(yaml)
+            .unwrap_or_else(|e| panic!("{name} pack failed to parse: {e}"));
+        assert!(!pf.rules.is_empty(), "{name} pack has no rules");
+        let ev = RuleEvaluator::new(&pf)
+            .unwrap_or_else(|e| panic!("{name} pack failed evaluator build: {e}"));
+
+        // Normal context should not trigger safety denials
+        let (dec, _) = ev.evaluate(&ctx_normal());
+        assert!(
+            !matches!(dec, EvalDecision::CircuitBreak { .. }),
+            "{name} pack circuit-broke on normal context: {dec:?}"
+        );
+    }
+}
+
+#[test]
+fn gdpr_pack_blocks_deletion_request() {
+    let yaml = include_str!("../../../rules/packs/gdpr.yaml");
+    let pf = PolicyFile::from_yaml(yaml).unwrap();
+    let ev = RuleEvaluator::new(&pf).unwrap();
+
+    let mut ctx = ctx_normal();
+    ctx.gdpr_deletion_requested = true;
+    let (dec, _) = ev.evaluate(&ctx);
+    assert!(
+        matches!(dec, EvalDecision::Deny { ref rule_id, .. } if rule_id == "gdpr_erasure_block"),
+        "GDPR Art. 17: active deletion request must Deny, got {dec:?}"
+    );
+}
+
+// ─── Regulatory enforcement: GDPR data minimisation ──────────────────────────
+
+#[test]
+fn gdpr_pack_blocks_excessive_pii_field_count() {
+    let yaml = include_str!("../../../rules/packs/gdpr.yaml");
+    let pf = PolicyFile::from_yaml(yaml).unwrap();
+    let ev = RuleEvaluator::new(&pf).unwrap();
+
+    // 11 PII fields exceeds the minimisation threshold of 10.
+    let mut ctx = ctx_normal();
+    ctx.pii_field_count = 11;
+    let (dec, _) = ev.evaluate(&ctx);
+    assert!(
+        matches!(dec, EvalDecision::Deny { ref rule_id, .. } if rule_id == "gdpr_data_minimisation"),
+        "GDPR Art. 5(1)(c): excessive PII fields must Deny, got {dec:?}"
+    );
+}
+
+// ─── Regulatory enforcement: GDPR cross-border transfer ──────────────────────
+
+#[test]
+fn gdpr_pack_blocks_cross_border_restricted_transfer() {
+    let yaml = include_str!("../../../rules/packs/gdpr.yaml");
+    let pf = PolicyFile::from_yaml(yaml).unwrap();
+    let ev = RuleEvaluator::new(&pf).unwrap();
+
+    let mut ctx = ctx_normal();
+    ctx.cross_border_restricted = true;
+    let (dec, _) = ev.evaluate(&ctx);
+    assert!(
+        matches!(dec, EvalDecision::Deny { ref rule_id, .. } if rule_id == "gdpr_cross_border_transfer"),
+        "GDPR Art. 44: restricted cross-border transfer must Deny, got {dec:?}"
+    );
+}
+
+// ─── Regulatory enforcement: PCI-DSS scope violation ─────────────────────────
+
+#[test]
+fn pci_dss_pack_blocks_undeclared_service_access() {
+    let yaml = include_str!("../../../rules/packs/pci_dss.yaml");
+    let pf = PolicyFile::from_yaml(yaml).unwrap();
+    let ev = RuleEvaluator::new(&pf).unwrap();
+
+    let mut ctx = ctx_normal();
+    ctx.accessing_undeclared_service = true;
+    let (dec, _) = ev.evaluate(&ctx);
+    assert!(
+        matches!(dec, EvalDecision::Deny { ref rule_id, .. } if rule_id == "pci_scope_creep"),
+        "PCI-DSS Req 7.1: undeclared service access must Deny, got {dec:?}"
+    );
+}
+
+// ─── Regulatory enforcement: clean context never fires safety blocks ──────────
+
+/// All four packs should ALLOW a well-behaved request with no compliance flags set.
+#[test]
+fn all_packs_allow_clean_request() {
+    let packs = &[
+        ("GDPR", include_str!("../../../rules/packs/gdpr.yaml")),
+        ("PCI-DSS", include_str!("../../../rules/packs/pci_dss.yaml")),
+        ("HIPAA", include_str!("../../../rules/packs/hipaa.yaml")),
+        (
+            "EU AI Act",
+            include_str!("../../../rules/packs/eu_ai_act.yaml"),
+        ),
+    ];
+
+    for (name, yaml) in packs {
+        let pf =
+            PolicyFile::from_yaml(yaml).unwrap_or_else(|e| panic!("{name} failed to parse: {e}"));
+        let ev = RuleEvaluator::new(&pf)
+            .unwrap_or_else(|e| panic!("{name} failed evaluator build: {e}"));
+
+        let (dec, _) = ev.evaluate(&ctx_normal());
+        assert!(
+            !matches!(
+                dec,
+                EvalDecision::Deny { .. } | EvalDecision::CircuitBreak { .. }
+            ),
+            "{name}: clean context must not block, got {dec:?}"
+        );
+    }
 }

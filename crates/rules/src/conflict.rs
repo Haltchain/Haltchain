@@ -160,7 +160,9 @@ fn values_equal(a: &FieldValue, b: &FieldValue) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::schema::{Condition, FieldValue, Op, PolicyFile, Priority, Rule, RuleAction};
+    use crate::schema::{
+        Condition, EnforcementMode, FieldValue, Op, PolicyFile, Priority, Rule, RuleAction,
+    };
 
     fn rule(
         id: &str,
@@ -190,6 +192,8 @@ mod tests {
         PolicyFile {
             version: "1".into(),
             rules,
+            max_delegation_depth: None,
+            enforcement_mode: EnforcementMode::default(),
         }
     }
 

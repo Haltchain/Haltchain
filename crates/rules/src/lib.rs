@@ -13,5 +13,7 @@ pub mod watcher;
 
 pub use conflict::{ConflictGraph, ConflictKind};
 pub use evaluator::{EvalDecision, EvalError, RuleEvaluator, RuleOutput};
-pub use schema::{EvalContext, FieldValue, Op, PolicyFile, Priority, Rule, RuleAction};
-pub use watcher::{PolicyHandle, watch_policy};
+pub use schema::{
+    EnforcementMode, EvalContext, FieldValue, Op, PolicyFile, Priority, Rule, RuleAction,
+};
+pub use watcher::{PolicyHandle, PolicyStore, watch_policy};

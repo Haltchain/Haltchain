@@ -150,10 +150,39 @@ pub struct Rule {
 
 //Policy file
 
+/// Enforcement mode for a policy file.
+///
+/// Shadow mode evaluates all rules but converts Deny/CircuitBreak to Flag,
+/// allowing operators to measure false-positive rates before enforcement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnforcementMode {
+    /// Normal enforcement — Deny and CircuitBreak halt the request.
+    Enforce,
+    /// Shadow / log-only — rules evaluate but never block. Denials are
+    /// converted to flags. Ideal for canary-testing new rule packs.
+    Shadow,
+}
+
+impl Default for EnforcementMode {
+    fn default() -> Self {
+        Self::Enforce
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyFile {
     pub version: String,
     pub rules: Vec<Rule>,
+    /// Global constraint: maximum allowed delegation chain depth.
+    /// Requests with `delegation_depth > max_delegation_depth` are denied.
+    /// Default: 3 (if absent, no automatic enforcement — rely on rules).
+    #[serde(default)]
+    pub max_delegation_depth: Option<u32>,
+    /// Enforcement mode. Defaults to `enforce`. Set to `shadow` for
+    /// log-only evaluation (new policies measuring FP rates).
+    #[serde(default)]
+    pub enforcement_mode: EnforcementMode,
 }
 
 impl PolicyFile {
@@ -183,6 +212,29 @@ pub struct EvalContext {
     pub actions_1m: usize,
     pub anomaly_score: f64,
     pub is_anomaly: bool,
+    /// Number of hops in the agent-to-agent delegation chain.
+    /// 0 = direct request (no delegation), 1 = one hop, etc.
+    pub delegation_depth: u32,
+
+    // ── Compliance pack fields ─────────────────────────────────────────────
+    // GDPR / PCI-DSS / HIPAA / EU AI Act rules inspect these fields.
+    // They are populated from `ValidationRequest.metadata` by the validator.
+    /// Number of PII fields the agent is accessing in this action.
+    /// Used by GDPR data minimisation (Art. 5(1)(c)) and PCI-DSS Req 3.2.
+    pub pii_field_count: usize,
+    /// True when an active GDPR erasure request (Art. 17) is in effect.
+    /// Any data processing while this is set MUST be blocked.
+    pub gdpr_deletion_requested: bool,
+    /// True when the data destination lacks an EU adequacy decision (Art. 44-49).
+    pub cross_border_restricted: bool,
+    /// Number of days the agent is requesting data to be retained.
+    /// GDPR Art. 5(1)(e) limits this to 2555 days (7 years).
+    pub retention_days_requested: u32,
+    /// True when the agent is attempting to call a service not in its declared scope.
+    /// Used by PCI-DSS Req 7.1 (least privilege) and HIPAA minimum necessary.
+    pub accessing_undeclared_service: bool,
+    /// True when the outbound payload contains PII fields not declared in the agent schema.
+    pub payload_contains_pii: bool,
 }
 
 impl EvalContext {
@@ -193,6 +245,9 @@ impl EvalContext {
             "ewma_velocity" => Some(self.ewma_velocity),
             "actions_1m" => Some(self.actions_1m as f64),
             "anomaly_score" => Some(self.anomaly_score),
+            "delegation_depth" => Some(self.delegation_depth as f64),
+            "pii_field_count" => Some(self.pii_field_count as f64),
+            "retention_days_requested" => Some(self.retention_days_requested as f64),
             _ => None,
         }
     }
@@ -210,6 +265,10 @@ impl EvalContext {
     pub fn get_bool(&self, field: &str) -> Option<bool> {
         match field {
             "is_anomaly" => Some(self.is_anomaly),
+            "gdpr_deletion_requested" => Some(self.gdpr_deletion_requested),
+            "cross_border_restricted" => Some(self.cross_border_restricted),
+            "accessing_undeclared_service" => Some(self.accessing_undeclared_service),
+            "payload_contains_pii" => Some(self.payload_contains_pii),
             _ => None,
         }
     }
