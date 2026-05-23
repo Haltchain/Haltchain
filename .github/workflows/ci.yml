@@ -65,6 +65,9 @@ jobs:
       - name: Run unit tests
         run: cargo test --workspace
 
+      - name: Compile all workspace targets (including operator integration tests)
+        run: cargo test --workspace --all-targets --no-run
+
       - name: Run integration tests
         run: cargo test -p haltchain-rules --test integration
 
@@ -244,8 +247,10 @@ jobs:
             kind: mixed
           - name: cache-hit-p99
             kind: cache
-          - name: unlogged-write-p95
-            kind: unlogged
+          - name: unlogged-enqueue-p95
+            kind: unlogged_enqueue
+          - name: unlogged-insert-p95
+            kind: unlogged_insert
           - name: pgvector-search-p99
             kind: pgvector
     env:
@@ -269,7 +274,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Apply schema migrations
-        if: matrix.gate.kind == 'unlogged' || matrix.gate.kind == 'pgvector'
+        if: matrix.gate.kind == 'unlogged_enqueue' || matrix.gate.kind == 'unlogged_insert' || matrix.gate.kind == 'pgvector'
         env:
           PGPASSWORD: haltchain
         run: |
@@ -299,9 +304,13 @@ jobs:
               HALTCHAIN_BENCH_CACHE_HIT_P99_TARGET_US="1000" \
               cargo run -p haltchain-bench --release --bin cache_hit_gate
               ;;
-            unlogged)
+            unlogged_enqueue)
               HALTCHAIN_BENCH_UNLOGGED_WRITE_P95_TARGET_US="10" \
               cargo run -p haltchain-bench --release --bin unlogged_write_gate
+              ;;
+            unlogged_insert)
+              HALTCHAIN_BENCH_UNLOGGED_INSERT_P95_TARGET_US="1000" \
+              cargo run -p haltchain-bench --release --bin unlogged_insert_gate
               ;;
             pgvector)
               HALTCHAIN_BENCH_PGVECTOR_P99_TARGET_US="2000" \
@@ -312,6 +321,15 @@ jobs:
               exit 2
               ;;
           esac
+
+  ebpf-deps:
+    name: eBPF BPF crate dependency gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify aya-ebpf dependency resolves
+        run: cargo fetch --manifest-path crates/ebpf-bpf/Cargo.toml
 
   #Security audit 
   audit:
