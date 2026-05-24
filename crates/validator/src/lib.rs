@@ -32,6 +32,7 @@ use haltchain_embeddings::{
 use haltchain_merkle::MerkleAccumulator;
 use haltchain_mcp_guard::McpGuard;
 use haltchain_mcp_guard::types::{Decision as McpDecision, McpToolCall};
+use haltchain_mcp_guard::LiteMcpGuard;
 use haltchain_policy::{
     ActionContext, AggregateBreaker, CIRCUIT_BREAK_SECS, MAX_ACTIONS_PER_MINUTE, PolicyResult,
 };
@@ -148,6 +149,7 @@ pub use improvement::{
     VersionDiffSummary, VersionLineageEntry,
 };
 pub use haltchain_mcp_guard::types::{Decision as McpInspectDecision, McpToolCall as McpInspectToolCall};
+pub use haltchain_mcp_guard::{LiteInspectResult, McpInspectProof};
 pub use types::{
     ActionPayload, AdjustmentRecommendation, AgentStatus, ApproveRecommendationRequest,
     CreateVariantReq, DataSource, Decision, DriftStatus, IntentRecord, LearningRunReport,
@@ -204,6 +206,7 @@ pub struct AppState {
     pub scan_queue: Arc<TokioChannelQueue>,
     // ── Phase 1b: MCP guard ──
     pub mcp_guard: Option<Arc<McpGuard>>,
+    mcp_lite: Option<std::sync::Mutex<LiteMcpGuard>>,
     // ── Recursive self-improvement validation ──
     pub version_store: VersionStore,
 }
@@ -289,6 +292,7 @@ impl AppState {
             capability: Arc::new(CapabilityClassifier::default()),
             scan_queue: TokioChannelQueue::new(1024),
             mcp_guard,
+            mcp_lite: None,
             version_store: VersionStore::new(),
         })
     }
@@ -319,6 +323,12 @@ impl AppState {
         tracing::info!("standalone mode: SQLite persistence, hash-projection embeddings");
         let remote_cache = Self::remote_cache_from_env();
         let mcp_guard = Self::mcp_guard_from_db(&db, remote_cache.as_ref());
+        let mcp_lite = if mcp_guard.is_none() {
+            tracing::info!("standalone: using LiteMcpGuard for /mcp/inspect (pattern + baseline)");
+            Some(std::sync::Mutex::new(LiteMcpGuard::from_env()))
+        } else {
+            None
+        };
         Arc::new(Self {
             agents: DashMap::new(),
             cache: DecisionCache::new(),
@@ -349,6 +359,7 @@ impl AppState {
             capability: Arc::new(CapabilityClassifier::default()),
             scan_queue: TokioChannelQueue::new(1024),
             mcp_guard,
+            mcp_lite,
             version_store: VersionStore::new(),
         })
     }
@@ -394,6 +405,7 @@ impl AppState {
             capability: Arc::new(CapabilityClassifier::default()),
             scan_queue: TokioChannelQueue::new(1024),
             mcp_guard,
+            mcp_lite: None,
             version_store: VersionStore::new(),
         })
     }
@@ -440,11 +452,49 @@ impl AppState {
     pub async fn inspect_mcp_tool_call(
         &self,
         call: &McpToolCall,
-    ) -> Result<McpDecision, String> {
-        match &self.mcp_guard {
-            Some(guard) => guard.inspect_tool_call(call).await.map_err(|e| e.to_string()),
-            None => Err("MCP guard unavailable".to_string()),
+    ) -> Result<LiteInspectResult, String> {
+        if let Some(lite) = &self.mcp_lite {
+            let mut guard = lite
+                .lock()
+                .map_err(|_| "mcp lite guard lock poisoned".to_string())?;
+            return Ok(guard.inspect(call));
         }
+
+        let guard = self
+            .mcp_guard
+            .as_ref()
+            .ok_or_else(|| "MCP guard unavailable".to_string())?;
+        let t0 = std::time::Instant::now();
+        let decision = guard
+            .inspect_tool_call(call)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let txn = uuid::Uuid::new_v4().to_string();
+        let ts = chrono::Utc::now().to_rfc3339();
+        let decision_label = match &decision {
+            McpDecision::Allow => "ALLOW",
+            McpDecision::Block { .. } => "BLOCK",
+            McpDecision::Quarantine { .. } => "QUARANTINE",
+        };
+        let envelope = self.signing.sign_decision(
+            &txn,
+            decision_label,
+            &call.agent_id.to_string(),
+            &ts,
+            "phase1b",
+        );
+        self.merkle
+            .push(&txn, &ts, decision_label, &envelope.content_hash);
+
+        Ok(LiteInspectResult {
+            decision,
+            latency_us: t0.elapsed().as_micros() as u64,
+            proof: McpInspectProof {
+                envelope,
+                merkle_root: self.merkle.status().root_hex.unwrap_or_default(),
+            },
+        })
     }
 
     pub fn cache_stats(&self) -> CacheStats {

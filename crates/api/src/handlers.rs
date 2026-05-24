@@ -979,28 +979,42 @@ async fn mcp_inspect(
     }
 
     match state.inspect_mcp_tool_call(&call).await {
-        Ok(McpInspectDecision::Allow) => {
-            Json(json!({ "decision": "allow", "result": "allow" })).into_response()
+        Ok(out) => {
+            let latency_ms = (out.latency_us as f64) / 1000.0;
+            let proof = serde_json::to_value(&out.proof).unwrap_or(json!({}));
+            match out.decision {
+                McpInspectDecision::Allow => Json(json!({
+                    "decision": "allow",
+                    "result": "allow",
+                    "latency_ms": latency_ms,
+                    "proof": proof,
+                }))
+                .into_response(),
+                McpInspectDecision::Block { reason, intent } => Json(json!({
+                    "decision": "block",
+                    "result": "block",
+                    "reason": reason,
+                    "intent": intent,
+                    "latency_ms": latency_ms,
+                    "proof": proof,
+                }))
+                .into_response(),
+                McpInspectDecision::Quarantine {
+                    review_id,
+                    reason,
+                    intent,
+                } => Json(json!({
+                    "decision": "quarantine",
+                    "result": "quarantine",
+                    "review_id": review_id,
+                    "reason": reason,
+                    "intent": intent,
+                    "latency_ms": latency_ms,
+                    "proof": proof,
+                }))
+                .into_response(),
+            }
         }
-        Ok(McpInspectDecision::Block { reason, intent }) => Json(json!({
-            "decision": "block",
-            "result": "block",
-            "reason": reason,
-            "intent": intent,
-        }))
-        .into_response(),
-        Ok(McpInspectDecision::Quarantine {
-            review_id,
-            reason,
-            intent,
-        }) => Json(json!({
-            "decision": "quarantine",
-            "result": "quarantine",
-            "review_id": review_id,
-            "reason": reason,
-            "intent": intent,
-        }))
-        .into_response(),
         Err(err) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": err })),

@@ -1,4 +1,7 @@
+pub mod lite;
 pub mod types;
+
+pub use lite::{LiteInspectResult, LiteMcpGuard, McpInspectProof};
 
 use std::collections::HashMap;
 use std::sync::Arc;

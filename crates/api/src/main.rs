@@ -470,6 +470,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn standalone_mcp_inspect_blocks_exec_shell() {
+        let baseline = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../demo/baseline.json");
+        if baseline.exists() {
+            unsafe {
+                std::env::set_var(
+                    "HALTCHAIN_MCP_BASELINE_PATH",
+                    baseline.to_string_lossy().as_ref(),
+                );
+            }
+        }
+        let state = AppState::new_standalone().await;
+        let app = build_app(Arc::clone(&state));
+        let org = Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let agent = Uuid::parse_str("22222222-2222-2222-2222-222222222222").unwrap();
+        let body = json!({
+            "agent_id": agent,
+            "org_id": org,
+            "tool_name": "exec_shell",
+            "tool_args": {"cmd": "rm -rf /"},
+            "context_hash": "test",
+            "timestamp": 0_i64
+        });
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/mcp/inspect")
+                    .header("content-type", "application/json")
+                    .header("x-api-key", "dev-key")
+                    .header("x-haltchain-org", org.to_string())
+                    .body(Body::from(body.to_string()))
+                    .expect("request should build"),
+            )
+            .await
+            .expect("mcp inspect should respond");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let out = response_json(resp).await;
+        assert_eq!(out["decision"], "block");
+        assert_eq!(out["intent"], "malicious_execution");
+        assert!(out["proof"]["merkle_root"].is_string());
+        assert!(out["latency_ms"].is_number());
+    }
+
+    #[tokio::test]
     async fn recommendation_run_requires_admin_header() {
         let app = build_app(AppState::new());
         let resp = app
