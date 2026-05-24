@@ -1,0 +1,19 @@
+[package]
+name = "haltchain-ebpf-bpf"
+version = "0.1.0"
+edition = "2024"
+description = "eBPF programs for HaltChain syscall interception"
+
+[dependencies]
+aya-ebpf = { version = "0.1.1", default-features = false }
+aya-ebpf-macros = "0.1.2"
+
+[[bin]]
+name = "haltchain"
+path = "src/main.rs"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

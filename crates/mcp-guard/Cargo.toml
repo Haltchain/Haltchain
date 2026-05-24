@@ -3,6 +3,10 @@ name = "haltchain-mcp-guard"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "haltchain-mcp"
+path = "src/bin/haltchain_mcp.rs"
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -14,7 +18,11 @@ pgvector = { version = "0.4", features = ["sqlx"] }
 sha2 = { workspace = true }
 hex = { workspace = true }
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 aho-corasick = "1"
+clap = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
 haltchain-cognitive = { path = "../cognitive" }
 haltchain-cache = { path = "../cache" }
 haltchain-signing = { path = "../signing" }
@@ -22,6 +30,8 @@ haltchain-merkle = { path = "../merkle" }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
+ureq = { version = "2", features = ["json"] }
+serde_json = { workspace = true }
 
 [[bench]]
 name = "mcp_guard_latency"

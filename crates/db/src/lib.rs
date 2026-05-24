@@ -172,6 +172,8 @@ pub struct PolicyAdjustmentRecord {
 }
 
 impl DbStore {
+    const DEFAULT_ORG_ID_FALLBACK: Uuid = Uuid::from_u128(1);
+
     pub fn from_pool(pool: PgPool) -> Self {
         let telemetry_hot_writer = TelemetryHotWriter::start(pool.clone());
         Self {
@@ -195,6 +197,17 @@ impl DbStore {
             ));
         }
         Ok(())
+    }
+
+    fn normalize_write_org_id(org_id: Option<Uuid>) -> Option<Uuid> {
+        if org_id.is_some() {
+            return org_id;
+        }
+        if Self::strict_tenant_org_required() {
+            return None;
+        }
+        // Keep legacy call sites alive while preventing NULL org rows.
+        Some(Self::DEFAULT_ORG_ID_FALLBACK)
     }
 
     async fn set_tx_tenant_context(
@@ -316,6 +329,7 @@ impl DbStore {
 
     pub async fn insert_decision(&self, r: &DecisionRecord) -> Result<i64, DbError> {
         Self::ensure_write_org_id(r.org_id)?;
+        let write_org_id = Self::normalize_write_org_id(r.org_id);
         // ── Postgres append-only hash chaining (Section C) ────────────────────
         // Each row stores:
         //   content_hash = SHA-256(txn_id \0 agent_id \0 decision \0 decided_at_iso)
@@ -332,7 +346,7 @@ impl DbStore {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
             .execute(&mut *tx)
             .await?;
-        if let Some(org_id) = r.org_id {
+        if let Some(org_id) = write_org_id {
             Self::set_tx_tenant_context(&mut tx, org_id).await?;
         }
 
@@ -382,7 +396,7 @@ impl DbStore {
             "#,
         )
         .bind(r.transaction_id)
-        .bind(r.org_id)
+        .bind(write_org_id)
         .bind(&r.agent_id)
         .bind(&r.decision)
         .bind(&r.domain)
@@ -410,6 +424,7 @@ impl DbStore {
         drift: &DriftLogRecord,
     ) -> Result<i64, DbError> {
         Self::ensure_write_org_id(r.org_id)?;
+        let write_org_id = Self::normalize_write_org_id(r.org_id);
         let decided_at = r.decided_at.unwrap_or_else(Utc::now);
         let decided_at_str = decided_at.to_rfc3339();
 
@@ -417,7 +432,7 @@ impl DbStore {
         sqlx::query("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE")
             .execute(&mut *tx)
             .await?;
-        if let Some(org_id) = r.org_id {
+        if let Some(org_id) = write_org_id {
             Self::set_tx_tenant_context(&mut tx, org_id).await?;
         }
 
@@ -463,7 +478,7 @@ impl DbStore {
             "#,
         )
         .bind(r.transaction_id)
-        .bind(r.org_id)
+        .bind(write_org_id)
         .bind(&r.agent_id)
         .bind(&r.decision)
         .bind(&r.domain)
@@ -950,11 +965,12 @@ impl DbStore {
     /// Insert an action embedding for drift tracking.
     pub async fn insert_action_embedding(&self, r: &ActionEmbeddingRecord) -> Result<i64, DbError> {
         Self::ensure_write_org_id(r.org_id)?;
+        let write_org_id = Self::normalize_write_org_id(r.org_id);
         let normalized = normalize_embedding(&r.embedding);
         let vec = Vector::from(normalized.clone());
         let vec_l2 = Vector::from(normalized.clone());
         let mut tx = self.pool.begin().await?;
-        if let Some(org_id) = r.org_id {
+        if let Some(org_id) = write_org_id {
             Self::set_tx_tenant_context(&mut tx, org_id).await?;
         }
         let row_id = sqlx::query_scalar(
@@ -966,7 +982,7 @@ impl DbStore {
             RETURNING id
             "#,
         )
-        .bind(r.org_id)
+        .bind(write_org_id)
         .bind(&r.agent_id)
         .bind(&r.session_id)
         .bind(r.transaction_id)
@@ -987,7 +1003,7 @@ impl DbStore {
                 // aborted; restart in a fresh transaction for fallback.
                 let _ = tx.rollback().await;
                 let mut fallback_tx = self.pool.begin().await?;
-                if let Some(org_id) = r.org_id {
+                if let Some(org_id) = write_org_id {
                     Self::set_tx_tenant_context(&mut fallback_tx, org_id).await?;
                 }
                 let id: i64 = sqlx::query_scalar(
@@ -999,7 +1015,7 @@ impl DbStore {
                     RETURNING id
                     "#,
                 )
-                .bind(r.org_id)
+                .bind(write_org_id)
                 .bind(&r.agent_id)
                 .bind(&r.session_id)
                 .bind(r.transaction_id)
@@ -1288,6 +1304,24 @@ impl DbStore {
     /// Critical audit data must go through `insert_decision` instead.
     pub async fn insert_telemetry_hot(&self, r: &TelemetryRecord) -> Result<(), DbError> {
         self.telemetry_hot_writer.enqueue(r).await
+    }
+
+    /// Synchronous INSERT for benchmark gates measuring real DB write latency.
+    pub async fn insert_telemetry_hot_sync(&self, r: &TelemetryRecord) -> Result<(), DbError> {
+        sqlx::query(
+            r#"
+            INSERT INTO telemetry_hot (org_id, agent_id, metric, value, tags)
+            VALUES ($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(r.org_id)
+        .bind(&r.agent_id)
+        .bind(&r.metric)
+        .bind(r.value)
+        .bind(&r.tags)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Upsert a drift counter in the unlogged hot table.

@@ -66,10 +66,10 @@ async fn main() {
 
     let db = DbStore::connect(&database_url)
         .await
-        .unwrap_or_else(|e| panic!("failed to connect db for unlogged write gate: {e}"));
+        .unwrap_or_else(|e| panic!("failed to connect db for unlogged enqueue gate: {e}"));
 
     let org_id = Uuid::new_v4();
-    let agent_id = format!("unlogged-gate-{}", Uuid::new_v4());
+    let agent_id = format!("unlogged-enqueue-gate-{}", Uuid::new_v4());
     let mut latencies_us = Vec::with_capacity(samples);
     let mut rec = TelemetryRecord {
         org_id: Some(org_id),
@@ -90,10 +90,13 @@ async fn main() {
 
     latencies_us.sort_unstable();
     let p95 = percentile(&latencies_us, 0.95);
-    println!("unlogged-write gate: samples={samples} p95={p95}us target={target_p95_us}us");
+    println!(
+        "unlogged-enqueue gate: samples={samples} p95={p95}us target={target_p95_us}us (measures mpsc enqueue only)"
+    );
     if let Some(path) = json_out.as_deref() {
         let payload = json!({
-            "gate": "unlogged_write_gate",
+            "gate": "unlogged_enqueue_gate",
+            "measurement": "mpsc_enqueue_only",
             "samples": samples,
             "p95_us": p95,
             "target_p95_us": target_p95_us
@@ -105,10 +108,10 @@ async fn main() {
     }
 
     if p95 > target_p95_us {
-        eprintln!("FAIL: unlogged write p95 {p95}us exceeds target {target_p95_us}us");
+        eprintln!("FAIL: unlogged enqueue p95 {p95}us exceeds target {target_p95_us}us");
         std::process::exit(1);
     }
-    println!("PASS: unlogged write p95 {p95}us <= target {target_p95_us}us");
+    println!("PASS: unlogged enqueue p95 {p95}us <= target {target_p95_us}us");
 }
 
 fn percentile(sorted: &[u64], p: f64) -> u64 {

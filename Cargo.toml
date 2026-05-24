@@ -8,6 +8,7 @@ edition = "2024"
 
 [workspace]
 members = ["crates/*", "crates/anchor", "haltchain-operator"]
+exclude = ["crates/ebpf-bpf"]
 resolver = "2"
 
 [workspace.dependencies]

@@ -1,0 +1,18 @@
+apiVersion: v2
+name: haltchain-operator
+description: A Helm chart for the HaltChain Kubernetes operator that manages AI agent security sidecars
+type: application
+version: 0.1.0
+appVersion: "latest"
+kubeVersion: ">= 1.25.0-0"
+home: https://haltchain.io
+sources:
+  - https://github.com/haltchain/operator
+maintainers:
+  - name: HaltChain Team
+    email: maintainers@haltchain.io
+keywords:
+  - kubernetes
+  - operator
+  - ai-security
+  - sidecar

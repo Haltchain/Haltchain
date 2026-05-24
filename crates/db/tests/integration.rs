@@ -123,7 +123,10 @@ fn role_admin_error(err: &sqlx::Error) -> bool {
         || text.contains("permission denied to grant role")
 }
 
-async fn create_temp_auditor_pool_or_skip(admin_db: &DbStore) -> Option<(String, PgPool)> {
+async fn create_temp_auditor_pool_or_skip(
+    admin_db: &DbStore,
+    max_connections: u32,
+) -> Option<(String, PgPool)> {
     let base_url = database_url()?;
     let role_name = format!("haltchain_auditor_{}", Uuid::new_v4().simple());
     let password = format!("pw{}", Uuid::new_v4().simple());
@@ -162,7 +165,7 @@ async fn create_temp_auditor_pool_or_skip(admin_db: &DbStore) -> Option<(String,
         .username(&role_name)
         .password(&password);
     let pool = PgPoolOptions::new()
-        .max_connections(1)
+        .max_connections(max_connections.max(1))
         .connect_with(connect_options)
         .await
         .expect("temporary auditor role should connect to the test database");
@@ -694,7 +697,7 @@ async fn test_auditor_view_rls_filters_by_org_from_jwt() {
         return;
     };
 
-    let Some((role_name, auditor_pool)) = create_temp_auditor_pool_or_skip(&db).await else {
+    let Some((role_name, auditor_pool)) = create_temp_auditor_pool_or_skip(&db, 1).await else {
         return;
     };
 
@@ -767,7 +770,7 @@ async fn test_auditor_view_hides_org_id_null_rows() {
         return;
     };
 
-    let Some((role_name, auditor_pool)) = create_temp_auditor_pool_or_skip(&db).await else {
+    let Some((role_name, auditor_pool)) = create_temp_auditor_pool_or_skip(&db, 1).await else {
         return;
     };
 
@@ -828,6 +831,128 @@ async fn test_auditor_view_hides_org_id_null_rows() {
     assert_eq!(rows[0].1.as_deref(), Some(expected_reason.as_str()));
 
     drop(auditor_conn);
+    drop(auditor_pool);
+    drop_temp_role(&db, &role_name).await;
+}
+
+#[tokio::test]
+async fn test_auditor_rls_isolation_under_1000_concurrent_org_contexts() {
+    let Some(db) = connect_or_skip().await else {
+        return;
+    };
+
+    let Some((role_name, auditor_pool)) = create_temp_auditor_pool_or_skip(&db, 64).await else {
+        return;
+    };
+
+    let marker = Uuid::new_v4().simple().to_string();
+    let secret = jwt_secret_for_tests();
+    let orgs: Vec<Uuid> = (0..1000).map(|_| Uuid::new_v4()).collect();
+
+    for org_id in &orgs {
+        sqlx::query(
+            r#"
+            INSERT INTO decisions_hot (
+                transaction_id, agent_id, decision, domain, policy_code, reason, org_id
+            )
+            VALUES ($1, $2, $3::policy_result, $4::breaker_domain, $5, $6, $7)
+            "#,
+        )
+        .bind(Uuid::new_v4())
+        .bind(format!("auditor-iso-{}", org_id.simple()))
+        .bind("DENY")
+        .bind("security")
+        .bind("RLS_1000_CONCURRENT_TEST")
+        .bind(format!("rls-1k-{marker}-{}", org_id.simple()))
+        .bind(org_id)
+        .execute(db.pool())
+        .await
+        .expect("failed to seed decisions_hot for 1000-org isolation test");
+    }
+
+    let failures = Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+    let gate = Arc::new(tokio::sync::Semaphore::new(64));
+    let mut tasks = Vec::with_capacity(orgs.len());
+
+    for org_id in orgs {
+        let pool = auditor_pool.clone();
+        let marker = marker.clone();
+        let secret = secret.clone();
+        let failures = Arc::clone(&failures);
+        let gate = Arc::clone(&gate);
+        tasks.push(tokio::spawn(async move {
+            let _permit = gate.acquire_owned().await.expect("semaphore closed");
+            let mut conn = match pool.acquire().await {
+                Ok(c) => c,
+                Err(err) => {
+                    failures
+                        .lock()
+                        .await
+                        .push(format!("acquire failed for {org_id}: {err}"));
+                    return;
+                }
+            };
+
+            let token = issue_test_jwt(org_id, &secret, 300);
+            if let Err(err) = sqlx::query("SELECT set_tenant_from_jwt($1, $2)")
+                .bind(&token)
+                .bind(&secret)
+                .execute(&mut *conn)
+                .await
+            {
+                failures
+                    .lock()
+                    .await
+                    .push(format!("set_tenant_from_jwt failed for {org_id}: {err}"));
+                return;
+            }
+
+            let rows: Vec<(Option<Uuid>, Option<String>)> = match sqlx::query_as(
+                "SELECT org_id, reason FROM audit_decisions_view WHERE reason LIKE $1 ORDER BY reason",
+            )
+            .bind(format!("rls-1k-{marker}%"))
+            .fetch_all(&mut *conn)
+            .await
+            {
+                Ok(r) => r,
+                Err(err) => {
+                    failures
+                        .lock()
+                        .await
+                        .push(format!("query failed for {org_id}: {err}"));
+                    return;
+                }
+            };
+
+            if rows.len() != 1 {
+                failures.lock().await.push(format!(
+                    "org {org_id} saw {} rows instead of 1",
+                    rows.len()
+                ));
+                return;
+            }
+            let expected_reason = format!("rls-1k-{marker}-{}", org_id.simple());
+            if rows[0].0 != Some(org_id) || rows[0].1.as_deref() != Some(expected_reason.as_str()) {
+                failures.lock().await.push(format!(
+                    "org {org_id} saw mismatched row: org={:?} reason={:?}",
+                    rows[0].0, rows[0].1
+                ));
+            }
+        }));
+    }
+
+    futures_util::future::join_all(tasks).await;
+    let failures = failures.lock().await;
+    assert!(
+        failures.is_empty(),
+        "1000-org concurrent RLS isolation failures: {}. first={}",
+        failures.len(),
+        failures
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "none".to_string())
+    );
+
     drop(auditor_pool);
     drop_temp_role(&db, &role_name).await;
 }

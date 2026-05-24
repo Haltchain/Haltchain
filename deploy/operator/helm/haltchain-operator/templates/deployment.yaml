@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "haltchain-operator.fullname" . }}
+  namespace: {{ .Values.namespace.name }}
+  labels:
+    {{- include "haltchain-operator.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "haltchain-operator.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "haltchain-operator.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "haltchain-operator.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: operator
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          env:
+            {{- range $key, $value := .Values.env }}
+            - name: {{ $key }}
+              value: {{ $value | quote }}
+            {{- end }}
+            {{- if .Values.policyReload.webhookSecret }}
+            - name: HALTCHAIN_WEBHOOK_SECRET
+              value: {{ .Values.policyReload.webhookSecret | quote }}
+            {{- else if .Values.policyReload.webhookSecretExistingSecret }}
+            - name: HALTCHAIN_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.policyReload.webhookSecretExistingSecret }}
+                  key: webhook-secret
+            {{- end }}
+            - name: HALTCHAIN_SIDECAR_DEFAULT_PORT
+              value: {{ .Values.sidecar.defaultPort | quote }}
+            - name: HALTCHAIN_WEBHOOK_TLS_CERT
+              value: /etc/haltchain/webhook/tls.crt
+            - name: HALTCHAIN_WEBHOOK_TLS_KEY
+              value: /etc/haltchain/webhook/tls.key
+          ports:
+            - containerPort: {{ .Values.webhook.port }}
+              name: webhook
+          volumeMounts:
+            - name: webhook-tls
+              mountPath: /etc/haltchain/webhook
+              readOnly: true
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: webhook-tls
+          secret:
+            secretName: {{ .Values.webhook.tls.secretName }}

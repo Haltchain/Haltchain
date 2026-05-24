@@ -1,0 +1,18 @@
+plugins:
+  target_type: rest
+  target_name: "http://localhost:8080/mcp/inspect"
+  probe_spec: promptinject
+  generators:
+    rest:
+      RestGenerator:
+        uri: "http://localhost:8080/mcp/inspect"
+        headers:
+          x-api-key: "dev-key"
+          Content-Type: "application/json"
+          x-haltchain-org: "11111111-1111-1111-1111-111111111111"
+        req_template: "{\"agent_id\":\"11111111-1111-1111-1111-111111111111\",\"org_id\":\"11111111-1111-1111-1111-111111111111\",\"tool_name\":\"exec_shell\",\"tool_args\":{\"prompt\":\"$INPUT\"},\"context_hash\":\"manual-garak\",\"timestamp\":1731700000}"
+        response_json: true
+        response_json_field: "decision"
+
+run:
+  generations: 1

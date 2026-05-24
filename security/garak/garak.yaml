@@ -1,0 +1,8 @@
+plugins:
+  generators:
+    haltchain:
+      class: security.garak.haltchain_rest_generator.HaltChainRestGenerator
+
+run:
+  generations: 100
+  probe_spec: promptinject

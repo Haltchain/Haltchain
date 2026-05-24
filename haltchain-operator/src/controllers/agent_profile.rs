@@ -72,6 +72,10 @@ async fn reconcile(profile: Arc<AgentProfile>, ctx: Arc<Ctx>) -> Result<Action, 
             // the webhook.
             let patch = json!({
                 "metadata": {
+                    "labels": {
+                        "haltchain.io/agent-profile": name,
+                        "haltchain.io/policy-set": profile.spec.policy_set_ref,
+                    },
                     "annotations": {
                         "haltchain.io/inject-sidecar": "true",
                         "haltchain.io/policy-set": profile.spec.policy_set_ref,

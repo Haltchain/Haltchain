@@ -21,8 +21,16 @@ name = "unlogged_write_gate"
 path = "src/unlogged_write_gate.rs"
 
 [[bin]]
+name = "unlogged_insert_gate"
+path = "src/unlogged_insert_gate.rs"
+
+[[bin]]
 name = "pgvector_search_gate"
 path = "src/pgvector_gate.rs"
+
+[[bin]]
+name = "mcp_enforcement_gate"
+path = "src/mcp_enforcement_gate.rs"
 
 [[bench]]
 name = "latency_critical"
@@ -59,6 +67,9 @@ haltchain-consensus  = { path = "../consensus" }
 haltchain-db         = { path = "../db" }
 haltchain-embeddings = { path = "../embeddings" }
 haltchain-policy     = { path = "../policy" }
+haltchain-mcp-guard  = { path = "../mcp-guard" }
+haltchain-cognitive  = { path = "../cognitive" }
+aho-corasick         = "1"
 uuid                 = { workspace = true }
 
 [dev-dependencies]
