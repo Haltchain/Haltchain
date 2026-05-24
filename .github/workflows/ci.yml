@@ -111,7 +111,12 @@ jobs:
             migrations/008_hash_chaining.sql \
             migrations/009_phase1b_pg_native.sql \
             migrations/010_phase1b_runtime_reliability_fixes.sql \
-            migrations/011_tenant_isolation_hardening.sql; do
+            migrations/011_tenant_isolation_hardening.sql \
+            migrations/012_vector_optimization.sql \
+            migrations/013_mcp_guard_schema.sql \
+            migrations/014_mcp_policy_engine.sql \
+            migrations/015_concurrency_hardening_and_phase2_prep.sql \
+            migrations/016_backfill_null_org_rows.sql; do
             psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
           done
       - name: Build API
@@ -186,7 +191,12 @@ jobs:
             migrations/008_hash_chaining.sql \
             migrations/009_phase1b_pg_native.sql \
             migrations/010_phase1b_runtime_reliability_fixes.sql \
-            migrations/011_tenant_isolation_hardening.sql; do
+            migrations/011_tenant_isolation_hardening.sql \
+            migrations/012_vector_optimization.sql \
+            migrations/013_mcp_guard_schema.sql \
+            migrations/014_mcp_policy_engine.sql \
+            migrations/015_concurrency_hardening_and_phase2_prep.sql \
+            migrations/016_backfill_null_org_rows.sql; do
             psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
           done
       - name: Build API
@@ -289,7 +299,12 @@ jobs:
             migrations/008_hash_chaining.sql \
             migrations/009_phase1b_pg_native.sql \
             migrations/010_phase1b_runtime_reliability_fixes.sql \
-            migrations/011_tenant_isolation_hardening.sql; do
+            migrations/011_tenant_isolation_hardening.sql \
+            migrations/012_vector_optimization.sql \
+            migrations/013_mcp_guard_schema.sql \
+            migrations/014_mcp_policy_engine.sql \
+            migrations/015_concurrency_hardening_and_phase2_prep.sql \
+            migrations/016_backfill_null_org_rows.sql; do
             psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
           done
 
@@ -313,8 +328,9 @@ jobs:
               cargo run -p haltchain-bench --release --bin unlogged_insert_gate
               ;;
             pgvector)
+              HALTCHAIN_BENCH_PGVECTOR_INSERT_SAMPLES="10000" \
               HALTCHAIN_BENCH_PGVECTOR_P99_TARGET_US="2000" \
-              cargo run -p haltchain-bench --release --bin pgvector_gate
+              cargo run -p haltchain-bench --release --bin pgvector_search_gate
               ;;
             *)
               echo "unknown benchmark gate" >&2
