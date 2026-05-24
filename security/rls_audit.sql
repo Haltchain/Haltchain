@@ -2,7 +2,7 @@
 
 -- 1) Null-org rows must be blocked at source for tenant-sensitive decisions.
 SELECT count(*) AS null_org_rows
-FROM decision_records
+FROM decisions_hot
 WHERE org_id IS NULL;
 
 -- 2) Tenant tables must have row security enabled.
