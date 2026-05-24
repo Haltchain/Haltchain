@@ -1,0 +1,25 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "haltchain-operator.fullname" . }}
+  labels:
+    {{- include "haltchain-operator.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [haltchain.io]
+    resources: [policysets, agentprofiles, auditsinks]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [haltchain.io]
+    resources: [policysets/status, agentprofiles/status, auditsinks/status]
+    verbs: [get, update, patch]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, list, watch, create, update, patch]
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, watch, create, update, patch, delete]

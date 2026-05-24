@@ -1,0 +1,227 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: policysets.haltchain.io
+spec:
+  group: haltchain.io
+  names:
+    kind: PolicySet
+    listKind: PolicySetList
+    plural: policysets
+    singular: policyset
+    shortNames: [pset]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Version
+          type: string
+          jsonPath: .spec.version
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [version]
+              properties:
+                version:
+                  type: string
+                  description: Semantic version of this rule pack (e.g. "1.2.0")
+                enforcement_mode:
+                  type: string
+                  enum: [enforcing, permissive, shadow]
+                  default: enforcing
+                rules:
+                  type: string
+                  description: Inline YAML rule-pack content
+                configMapRef:
+                  type: object
+                  required: [name]
+                  properties:
+                    name:
+                      type: string
+                    namespace:
+                      type: string
+                target_labels:
+                  type: object
+                  additionalProperties:
+                    type: string
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                message:
+                  type: string
+                last_reloaded_at:
+                  type: integer
+                  format: int64
+                active_sidecars:
+                  type: integer
+                  format: int32
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: agentprofiles.haltchain.io
+spec:
+  group: haltchain.io
+  names:
+    kind: AgentProfile
+    listKind: AgentProfileList
+    plural: agentprofiles
+    singular: agentprofile
+    shortNames: [apf]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: PolicySet
+          type: string
+          jsonPath: .spec.policySetRef
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [policySetRef]
+              properties:
+                policySetRef:
+                  type: string
+                sidecar_image:
+                  type: string
+                sidecar_port:
+                  type: integer
+                  default: 8080
+                sqlite_persistence:
+                  type: boolean
+                  default: false
+                resources:
+                  type: object
+                  properties:
+                    cpu_limit:
+                      type: string
+                    memory_limit:
+                      type: string
+                    cpu_request:
+                      type: string
+                    memory_request:
+                      type: string
+                extra_env:
+                  type: array
+                  items:
+                    type: object
+                    required: [name, value]
+                    properties:
+                      name:
+                        type: string
+                      value:
+                        type: string
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                message:
+                  type: string
+                managed_pods:
+                  type: integer
+                  format: int32
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: auditsinks.haltchain.io
+spec:
+  group: haltchain.io
+  names:
+    kind: AuditSink
+    listKind: AuditSinkList
+    plural: auditsinks
+    singular: auditsink
+    shortNames: [asink]
+  scope: Namespaced
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Type
+          type: string
+          jsonPath: .spec.sink_type
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required: [sink_type]
+              properties:
+                sink_type:
+                  type: string
+                  enum: [webhook, kafka, stdout]
+                webhook:
+                  type: object
+                  required: [url]
+                  properties:
+                    url:
+                      type: string
+                    secret_ref:
+                      type: string
+                    timeout_secs:
+                      type: integer
+                      default: 5
+                kafka:
+                  type: object
+                  required: [bootstrap_servers, topic]
+                  properties:
+                    bootstrap_servers:
+                      type: string
+                    topic:
+                      type: string
+                    sasl_secret_ref:
+                      type: string
+                min_severity:
+                  type: string
+                  enum: [ALLOW, DENY, CIRCUIT_BREAK]
+                buffer_size:
+                  type: integer
+                  default: 1000
+            status:
+              type: object
+              properties:
+                phase:
+                  type: string
+                message:
+                  type: string
+                events_emitted:
+                  type: integer
+                  format: int64
+                last_event_at:
+                  type: integer
+                  format: int64

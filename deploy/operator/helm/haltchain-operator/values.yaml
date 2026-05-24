@@ -1,0 +1,69 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/haltchain/operator
+  pullPolicy: IfNotPresent
+  tag: "latest"
+
+namespace:
+  create: true
+  name: haltchain-system
+
+nameOverride: ""
+fullnameOverride: ""
+
+crds:
+  install: true
+
+webhook:
+  port: 8443
+  servicePort: 443
+  tls:
+    secretName: haltchain-operator-webhook-tls
+    create: false
+    cert: ""
+    key: ""
+  failurePolicy: Ignore
+  namespaceSelector:
+    haltchain.io/inject: enabled
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 256Mi
+  requests:
+    cpu: 100m
+    memory: 64Mi
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65534
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+env:
+  RUST_LOG: info
+
+sidecar:
+  defaultPort: 8787
+  defaultImage: ghcr.io/haltchain/sidecar:latest
+  policySyncPath: /admin/webhook/policy-sync
+
+policyReload:
+  webhookSecret: ""
+  webhookSecretExistingSecret: ""
+
+podAnnotations: {}
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

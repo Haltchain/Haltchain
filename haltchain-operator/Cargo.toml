@@ -3,6 +3,10 @@ name = "haltchain-operator"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "haltchain_operator"
+path = "src/lib.rs"
+
 [[bin]]
 name = "haltchain-operator"
 path = "src/main.rs"
@@ -28,7 +32,14 @@ jsonptr      = "0.4"
 tower        = "0.4"
 chrono       = { workspace = true }
 tokio-rustls   = { workspace = true }
+hmac         = "0.12"
+sha2         = { workspace = true }
+hex          = { workspace = true }
 rustls         = { workspace = true }
 rustls-pemfile = { workspace = true }
 hyper          = { workspace = true }
 hyper-util     = { workspace = true }
+
+[dev-dependencies]
+serde_yaml = "0.9"
+kube = { version = "0.96", features = ["runtime", "derive", "client", "admission", "ws"] }

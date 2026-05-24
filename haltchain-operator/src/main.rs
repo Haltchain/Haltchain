@@ -1,10 +1,7 @@
 use anyhow::Result;
 use tracing::info;
 
-mod controllers;
-mod crd;
-mod webhook;
-
+use haltchain_operator::{controllers, webhook};
 use kube::Client;
 
 #[tokio::main]
@@ -20,7 +17,6 @@ async fn main() -> Result<()> {
     let client = Client::try_default().await?;
     info!("HaltChain Kubernetes operator starting");
 
-    // Run all controllers and the admission webhook server concurrently.
     tokio::try_join!(
         controllers::policy_set::run(client.clone()),
         controllers::agent_profile::run(client.clone()),

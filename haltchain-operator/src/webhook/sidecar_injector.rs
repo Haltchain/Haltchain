@@ -77,7 +77,7 @@ async fn mutate(req: AdmissionRequest<Pod>) -> anyhow::Result<AdmissionResponse>
     let port: i32 = annotations
         .get("haltchain.io/sidecar-port")
         .and_then(|p| p.parse().ok())
-        .unwrap_or(8080);
+        .unwrap_or(8787);
 
     let policy_set = annotations
         .get("haltchain.io/policy-set")
@@ -114,6 +114,11 @@ fn build_sidecar_container(image: &str, port: i32, policy_set: &str) -> Containe
             ..Default::default()
         }]),
         env: Some(vec![
+            EnvVar {
+                name: "PORT".to_string(),
+                value: Some(port.to_string()),
+                ..Default::default()
+            },
             EnvVar {
                 name: "HALTCHAIN_ENV".to_string(),
                 value: Some("kubernetes".to_string()),

@@ -43,7 +43,7 @@ pub struct AgentProfileSpec {
 }
 
 fn default_sidecar_port() -> u16 {
-    8080
+    8787
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
