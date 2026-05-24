@@ -144,6 +144,8 @@ cargo run -p haltchain-api
 # POST /mcp/inspect
 ```
 
+**Kill Switch demo (5 min, no Postgres):** see [DEMO.md](./DEMO.md) — `docker run -p 8787:8787 haltchain/lite:latest` + rogue agent script.
+
 ---
 
 ## 14-Stage Validation Pipeline
@@ -256,8 +258,8 @@ cargo test --workspace                          # 440+ tests across 40 suites (s
 ```bash
 cargo run -p haltchain-bench --bin cache_hit_gate           # enqueue L1 path
 cargo run -p haltchain-bench --bin unlogged_write_gate      # enqueue-only (<10µs)
-cargo run -p haltchain-bench --bin unlogged_insert_gate     # synchronous INSERT p95
-cargo run -p haltchain-bench --bin pgvector_search_gate     # <2ms target
+cargo run -p haltchain-bench --bin unlogged_insert_gate     # synchronous INSERT p95 (<1ms target)
+cargo run -p haltchain-bench --bin pgvector_search_gate     # <2ms p99 target (10k vectors / 10k queries gate)
 ```
 
 ---

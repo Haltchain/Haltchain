@@ -4,7 +4,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 const DIMS: usize = 1024;
-const DEFAULT_INSERT_SAMPLES: usize = 400;
+const DEFAULT_INSERT_SAMPLES: usize = 10_000;
 const DEFAULT_QUERY_SAMPLES: usize = 10_000;
 const DEFAULT_CONCURRENT_AGENTS: usize = 50;
 const DEFAULT_TARGET_US: u64 = 2_000;
@@ -242,7 +242,6 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
     sorted[idx.min(sorted.len() - 1)]
 }
 
-#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::percentile;
