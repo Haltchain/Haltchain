@@ -2,6 +2,9 @@
 name = "haltchain-queue"
 version = "0.1.0"
 edition = "2024"
+description = "In-process and Redis-backed task queues"
+license = "MIT"
+repository = "https://github.com/Haltchain/HaltChain"
 
 [features]
 default = []

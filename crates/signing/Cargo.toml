@@ -2,6 +2,9 @@
 name = "haltchain-signing"
 version = "0.1.0"
 edition = "2024"
+description = "Ed25519 signing and A2A attestation primitives"
+license = "MIT"
+repository = "https://github.com/Haltchain/HaltChain"
 
 [dependencies]
 ed25519-dalek = { workspace = true }

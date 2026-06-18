@@ -2,6 +2,9 @@
 name = "haltchain-merkle"
 version = "0.1.0"
 edition = "2024"
+description = "Merkle accumulator and proof primitives"
+license = "MIT"
+repository = "https://github.com/Haltchain/HaltChain"
 
 [dependencies]
 sha2        = { workspace = true }
