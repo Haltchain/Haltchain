@@ -338,14 +338,30 @@ jobs:
               ;;
           esac
 
-  ebpf-deps:
-    name: eBPF BPF crate dependency gate
+  ebpf-build:
+    name: eBPF BPF programs build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Verify aya-ebpf dependency resolves
-        run: cargo fetch --manifest-path crates/ebpf-bpf/Cargo.toml
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: bpfel-unknown-none
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ebpf-bpf
+
+      - name: Build eBPF programs
+        run: |
+          cargo +nightly build -Z build-std=core -p haltchain-ebpf-bpf --target bpfel-unknown-none --release
+          mkdir -p artifacts/ebpf
+          cp target/bpfel-unknown-none/release/haltchain artifacts/ebpf/haltchain.o
+
+      - name: Upload eBPF object artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: haltchain-ebpf-object
+          path: artifacts/ebpf/haltchain.o
+          if-no-files-found: error
 
   #Security audit 
   audit:
