@@ -2,10 +2,12 @@ import { useState, useEffect } from "react";
 import { Menu, X, Hexagon } from "lucide-react";
 import { useLocation } from "wouter";
 import { Button } from "@/components/ui/button";
+import { SignInModal } from "@/components/landing/SignInModal";
 
 export function Navbar() {
   const [isScrolled, setIsScrolled] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [signInOpen, setSignInOpen] = useState(false);
   const [, navigate] = useLocation();
 
   useEffect(() => {
@@ -60,6 +62,13 @@ export function Navbar() {
               </a>
             ))}
             <Button
+              onClick={() => setSignInOpen(true)}
+              variant="outline"
+              className="border-border text-foreground hover:bg-white/5 transition-all duration-300"
+            >
+              Sign In
+            </Button>
+            <Button
               onClick={handleDashboardClick}
               variant="outline"
               className="border-primary/50 text-primary hover:bg-primary/10 hover:text-primary transition-all duration-300 shadow-[0_0_15px_rgba(0,255,102,0.1)] hover:shadow-[0_0_25px_rgba(0,255,102,0.2)]"
@@ -95,10 +104,14 @@ export function Navbar() {
               </a>
             ))}
             <Button
-              onClick={() => {
-                handleDashboardClick();
-                setMobileMenuOpen(false);
-              }}
+              onClick={() => { setSignInOpen(true); setMobileMenuOpen(false); }}
+              variant="outline"
+              className="w-full"
+            >
+              Sign In
+            </Button>
+            <Button
+              onClick={() => { handleDashboardClick(); setMobileMenuOpen(false); }}
               className="w-full bg-primary/10 text-primary border border-primary hover:bg-primary/20"
             >
               Open Control Plane
@@ -107,5 +120,7 @@ export function Navbar() {
         </div>
       )}
     </nav>
+
+    <SignInModal open={signInOpen} onOpenChange={setSignInOpen} />
   );
 }

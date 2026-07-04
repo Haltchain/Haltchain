@@ -135,6 +135,38 @@ app.post("/api/auth/logout", (_req, res) => {
   res.json({ ok: true });
 });
 
+// Customer login: email + hardware key (hk-* prefix).
+// Proxies to the API when available; returns 503 with helpful message while backend is pending.
+app.post("/api/auth/customer/login", async (req, res) => {
+  const { email, hardware_key } = req.body ?? {};
+  if (!email || !hardware_key) {
+    res.status(400).json({ ok: false, error: "email and hardware_key are required" });
+    return;
+  }
+  if (typeof hardware_key !== "string" || !hardware_key.startsWith("hk-")) {
+    res.status(400).json({ ok: false, error: "Invalid hardware key format. Keys start with hk-" });
+    return;
+  }
+  try {
+    const upstream = await fetch(`${HALTCHAIN_API_URL}/auth/customer/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ email, hardware_key }),
+    });
+    if (!upstream.ok) {
+      const body = await upstream.json().catch(() => ({}));
+      clearSessionCookie(res);
+      res.status(upstream.status).json({ ok: false, error: body.error ?? "Invalid credentials" });
+      return;
+    }
+    const { token } = await upstream.json();
+    setSessionCookie(res, token);
+    res.json({ ok: true });
+  } catch {
+    res.status(503).json({ ok: false, error: "Customer authentication is not yet available. Backend coming soon." });
+  }
+});
+
 // ── Admin proxy routes ─────────────────────────────────────────────────────────
 
 app.get("/api/admin/review-queue", (req, res) =>
