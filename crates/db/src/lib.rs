@@ -1355,9 +1355,50 @@ impl DbStore {
 
     // ── Full-Text Search on Audit Decisions ───────────────────────────────────
 
-    /// Full-text search over `decisions_hot` using TSVector index.
-    /// `query` is a plain-text string; converted to tsquery via plainto_tsquery.
-    /// Returns up to `limit` results ordered by recency.
+    /// Tenant-scoped FTS using the `audit_fts_search()` SQL function (migration 015).
+    /// Sets `app.current_org_id` on a dedicated connection so RLS applies, returns
+    /// ts_rank-scored results, then resets tenant context before returning the connection.
+    pub async fn search_audit_decisions_scoped(
+        &self,
+        org_id: Uuid,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<AuditSearchResult>, DbError> {
+        use sqlx::Row;
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("SELECT set_config('app.current_org_id', $1, false)")
+            .bind(org_id.to_string())
+            .execute(&mut *conn)
+            .await?;
+        let rows = sqlx::query(
+            r#"SELECT id, transaction_id, agent_id, decision, reason, policy_code, decided_at
+               FROM audit_fts_search($1, $2)"#,
+        )
+        .bind(query)
+        .bind(limit as i32)
+        .fetch_all(&mut *conn)
+        .await?;
+        sqlx::query("SELECT reset_tenant_context()")
+            .execute(&mut *conn)
+            .await
+            .ok();
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(AuditSearchResult {
+                id: row.get("id"),
+                transaction_id: row.get("transaction_id"),
+                agent_id: row.get("agent_id"),
+                decision: row.get("decision"),
+                reason: row.get("reason"),
+                policy_code: row.get("policy_code"),
+                decided_at: row.get("decided_at"),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Unscoped FTS — no tenant filtering. Only for internal/admin use; do NOT expose
+    /// directly to multi-tenant API callers. Prefer `search_audit_decisions_scoped`.
     pub async fn search_audit_decisions(
         &self,
         query: &str,

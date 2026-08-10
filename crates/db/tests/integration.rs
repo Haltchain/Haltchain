@@ -296,9 +296,7 @@ async fn test_find_similar_actions() {
     for i in 0..512 {
         orthogonal[i] = -(base[i] + 1.0);
     }
-    for i in 512..1024 {
-        orthogonal[i] = base[i];
-    }
+    orthogonal[512..1024].copy_from_slice(&base[512..1024]);
 
     // "close" to base — just slightly shifted.
     let close: Vec<f32> = base.iter().map(|v| v + 0.01).collect();
@@ -639,6 +637,61 @@ async fn test_search_audit_decisions_fts() {
         "FTS should find the inserted decision for token '{unique_token}'"
     );
     assert_eq!(results[0].agent_id, agent_id);
+}
+
+// Cross-tenant FTS isolation: a decision inserted for org_a must NOT appear when
+// querying with org_b's context via search_audit_decisions_scoped.
+#[tokio::test]
+async fn test_fts_scoped_cross_tenant_isolation() {
+    let Some(db) = connect_or_skip().await else {
+        return;
+    };
+
+    let org_a = Uuid::new_v4();
+    let org_b = Uuid::new_v4();
+    let unique_token = format!(
+        "crosstenant{}",
+        Uuid::new_v4().to_string().replace('-', "")
+    );
+
+    let rec = DecisionRecord {
+        transaction_id: Uuid::new_v4(),
+        org_id: Some(org_a),
+        agent_id: format!("ct-agent-{}", Uuid::new_v4()),
+        decision: "DENY".to_string(),
+        domain: Some("security".to_string()),
+        policy_code: Some("CROSS_TENANT_TEST".to_string()),
+        reason: Some(format!("blocked {unique_token} content")),
+        sig_nonce: None,
+        sig_signed_at: None,
+        sig_b64: None,
+        request_nonce: None,
+        request_sig: None,
+        decided_at: None,
+    };
+    db.insert_decision(&rec)
+        .await
+        .expect("insert_decision failed");
+
+    // org_a should see it
+    let found = db
+        .search_audit_decisions_scoped(org_a, &unique_token, 10)
+        .await
+        .expect("scoped search for org_a failed");
+    assert!(
+        !found.is_empty(),
+        "org_a should find its own decision via FTS"
+    );
+
+    // org_b must NOT see org_a's decision
+    let not_found = db
+        .search_audit_decisions_scoped(org_b, &unique_token, 10)
+        .await
+        .expect("scoped search for org_b failed");
+    assert!(
+        not_found.is_empty(),
+        "org_b must not see org_a's decision via FTS (cross-tenant leak)"
+    );
 }
 
 // Test: set_tenant_context applies to session
