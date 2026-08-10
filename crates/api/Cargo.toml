@@ -24,6 +24,7 @@ base64            = { workspace = true }
 ed25519-dalek     = { workspace = true }
 dashmap           = { workspace = true }
 haltchain-validator  = { path = "../validator" }
+haltchain-policy     = { path = "../policy" }
 haltchain-db         = { path = "../db" }
 haltchain-cognitive  = { path = "../cognitive" }
 haltchain-capability = { path = "../capability" }

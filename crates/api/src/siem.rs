@@ -81,10 +81,7 @@ pub fn format_cef_line(
         ext.push_str(&format!(" cs1={} cs1Label=merkleRoot", cef_escape(root)));
     }
     if let Some(intent) = intent_label.filter(|s| !s.trim().is_empty()) {
-        ext.push_str(&format!(
-            " cs2={} cs2Label=intentLabel",
-            cef_escape(intent)
-        ));
+        ext.push_str(&format!(" cs2={} cs2Label=intentLabel", cef_escape(intent)));
     }
 
     format!(
@@ -98,12 +95,11 @@ pub fn emit_cef(line: &str) {
     // Always emit to tracing so it appears in structured log outputs.
     tracing::info!(cef_line = %line, "SIEM CEF");
 
-    if let Ok(path) = std::env::var("HALTCHAIN_SIEM_CEF_LOG_PATH") {
-        if !path.is_empty() {
-            if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path) {
-                let _ = writeln!(f, "{line}");
-            }
-        }
+    if let Ok(path) = std::env::var("HALTCHAIN_SIEM_CEF_LOG_PATH")
+        && !path.is_empty()
+        && let Ok(mut f) = OpenOptions::new().create(true).append(true).open(&path)
+    {
+        let _ = writeln!(f, "{line}");
     }
 }
 

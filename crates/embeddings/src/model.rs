@@ -16,7 +16,10 @@ use thiserror::Error;
 fn emit_security_downgrade_cef(reason: &str, hash_dims: usize) {
     // CEF sig HC010 matches the API siem module's emit_embedding_downgrade
     let ts = chrono::Utc::now().to_rfc3339();
-    let escaped_reason = reason.replace('\\', "\\\\").replace('=', "\\=").replace('\n', "\\n");
+    let escaped_reason = reason
+        .replace('\\', "\\\\")
+        .replace('=', "\\=")
+        .replace('\n', "\\n");
     let line = format!(
         "CEF:0|HaltChain|Validator|{}|HC010|Embedding Security Downgrade|6|\
          rt={ts} act=hash_fallback cs3={hash_dims} cs3Label=hashDims msg={escaped_reason}",
@@ -33,12 +36,16 @@ fn emit_security_downgrade_cef(reason: &str, hash_dims: usize) {
         "SECURITY_DOWNGRADE: ONNX embedding unavailable; detection confidence near-zero"
     );
     // Also write to CEF log file if configured
-    if let Ok(path) = std::env::var("HALTCHAIN_SIEM_CEF_LOG_PATH") {
-        if !path.is_empty() {
-            use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-                let _ = writeln!(f, "{line}");
-            }
+    if let Ok(path) = std::env::var("HALTCHAIN_SIEM_CEF_LOG_PATH")
+        && !path.is_empty()
+    {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = writeln!(f, "{line}");
         }
     }
 }
@@ -167,21 +174,17 @@ impl LocalModel {
             cache_dirs.insert(0, Some(PathBuf::from(env_dir)));
         }
 
-        for dir in &cache_dirs {
-            if let Some(dir) = dir {
-                if dir.exists() {
-                    if let Ok(onnx) = OnnxModel::from_dir(dir) {
-                        return Ok(onnx);
-                    }
-                }
+        for dir in cache_dirs.iter().flatten() {
+            if dir.exists()
+                && let Ok(onnx) = OnnxModel::from_dir(dir)
+            {
+                return Ok(onnx);
             }
         }
 
         eprintln!("ONNX model not found. Searched in:");
-        for dir in &cache_dirs {
-            if let Some(d) = dir {
-                eprintln!("  - {}", d.display());
-            }
+        for d in cache_dirs.iter().flatten() {
+            eprintln!("  - {}", d.display());
         }
         eprintln!("\nDownload with: ./scripts/download_arctic_onnx.sh");
         eprintln!("Or set HALTCHAIN_MODEL_DIR environment variable.");
@@ -566,6 +569,10 @@ impl ModelKind {
             }
             Err(e) => {
                 let env = std::env::var("HALTCHAIN_ENV").unwrap_or_default();
+                // Always emit HC010 so SIEM consumers see the downgrade event
+                // regardless of whether the process is about to panic.
+                let reason = format!("ONNX model unavailable: {e}");
+                emit_security_downgrade_cef(&reason, hd);
                 if env.eq_ignore_ascii_case("production") {
                     panic!(
                         "FATAL: ONNX model not available in production mode. \
@@ -574,9 +581,6 @@ impl ModelKind {
                          Error: {e}"
                     );
                 }
-                // Emit CEF security-downgrade event so SIEM consumers can alert on this.
-                let reason = format!("ONNX model unavailable: {e}");
-                emit_security_downgrade_cef(&reason, hd);
                 Self::Hash(HashModel::new(hd))
             }
         }
