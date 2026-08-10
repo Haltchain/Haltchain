@@ -633,7 +633,7 @@ impl CommandContainmentBridge {
     fn run_or_noop(cmd: &Option<String>, agent_id: &str, reason: &str) -> Result<String, String> {
         match cmd {
             Some(c) if !c.trim().is_empty() => Self::run_template(c, agent_id, reason),
-            _ => Ok("noop".to_string()),
+            _ => Err(format!("containment-noop: no command configured for {reason} on agent {agent_id}")),
         }
     }
 }
@@ -649,7 +649,13 @@ impl ContainmentBridge for CommandContainmentBridge {
     }
 
     async fn trigger_kill_switch(&self, agent_id: &str, reason: &str) -> Result<bool, String> {
-        Self::run_or_noop(&self.kill_switch_cmd, agent_id, reason).map(|_| true)
+        // Return false when no kill-switch command is configured so callers can
+        // distinguish "executed" (true) from "unconfigured/noop" (false).
+        match Self::run_or_noop(&self.kill_switch_cmd, agent_id, reason) {
+            Ok(_) => Ok(true),
+            Err(e) if e.starts_with("containment-noop:") => Ok(false),
+            Err(e) => Err(e),
+        }
     }
 
     async fn create_forensic_snapshot(&self, agent_id: &str) -> Result<String, String> {
@@ -1003,12 +1009,14 @@ mod tests {
 
     #[tokio::test]
     async fn command_containment_bridge_runs_commands() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe { std::env::set_var("HALTCHAIN_CONTAINMENT_TERMINATE_CMD", "exit 0") };
-        unsafe { std::env::set_var("HALTCHAIN_CONTAINMENT_REVOKE_CMD", "exit 0") };
-        unsafe { std::env::set_var("HALTCHAIN_CONTAINMENT_KILL_SWITCH_CMD", "exit 0") };
-        unsafe { std::env::set_var("HALTCHAIN_CONTAINMENT_SNAPSHOT_CMD", "echo snapshot-ok") };
-        unsafe { std::env::set_var("HALTCHAIN_CONTAINMENT_NOTIFY_CMD", "exit 0") };
+        {
+            let _guard = ENV_LOCK.lock().unwrap();
+            unsafe { std::env::set_var("HALTCHAIN_CONTAINMENT_TERMINATE_CMD", "exit 0") };
+            unsafe { std::env::set_var("HALTCHAIN_CONTAINMENT_REVOKE_CMD", "exit 0") };
+            unsafe { std::env::set_var("HALTCHAIN_CONTAINMENT_KILL_SWITCH_CMD", "exit 0") };
+            unsafe { std::env::set_var("HALTCHAIN_CONTAINMENT_SNAPSHOT_CMD", "echo snapshot-ok") };
+            unsafe { std::env::set_var("HALTCHAIN_CONTAINMENT_NOTIFY_CMD", "exit 0") };
+        }
 
         let bridge = CommandContainmentBridge::default();
         assert!(bridge.terminate_session("agent-1").await.is_ok());
