@@ -7,7 +7,6 @@ use ed25519_dalek::SigningKey;
 use haltchain_validator::{AppState, Decision, ValidationRequest, ValidationResponse};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing;
 
 //Genesis Block
 

@@ -223,10 +223,7 @@ impl PromptInjectionDetector {
         text.hash(&mut hasher);
         let hash = hasher.finish();
 
-        Array1::from_iter((0..32).map(|i| {
-            let val = ((hash.wrapping_add(i as u64)) % 1000) as f32 / 1000.0;
-            val
-        }))
+        Array1::from_iter((0..32).map(|i| ((hash.wrapping_add(i as u64)) % 1000) as f32 / 1000.0))
     }
 
     /// Record query for history tracking

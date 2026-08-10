@@ -144,6 +144,7 @@ pub fn tls_acceptor_from_env() -> Option<TlsAcceptor> {
 /// let acceptor = Arc::new(parking_lot::RwLock::new(tls_acceptor_from_env()));
 /// SpiffeReloader::spawn(acceptor.clone());
 /// ```
+#[allow(dead_code)]
 pub struct SpiffeReloader {
     cert_path: String,
     key_path: String,
@@ -152,6 +153,7 @@ pub struct SpiffeReloader {
     acceptor: Arc<parking_lot::RwLock<Option<TlsAcceptor>>>,
 }
 
+#[allow(dead_code)]
 impl SpiffeReloader {
     /// Create a reloader from environment variables and spawn it as a background task.
     ///

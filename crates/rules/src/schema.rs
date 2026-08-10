@@ -156,18 +156,14 @@ pub struct Rule {
 /// allowing operators to measure false-positive rates before enforcement.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum EnforcementMode {
     /// Normal enforcement — Deny and CircuitBreak halt the request.
+    #[default]
     Enforce,
     /// Shadow / log-only — rules evaluate but never block. Denials are
     /// converted to flags. Ideal for canary-testing new rule packs.
     Shadow,
-}
-
-impl Default for EnforcementMode {
-    fn default() -> Self {
-        Self::Enforce
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

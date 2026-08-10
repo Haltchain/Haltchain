@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aho_corasick::AhoCorasick;
-use haltchain_cache::dragonfly_client::{DragonflyClient, PolicyState};
 use haltchain_cache::CachedDecision;
+use haltchain_cache::dragonfly_client::{DragonflyClient, PolicyState};
 use haltchain_cognitive::{
     AlertType, CognitiveMonitor, ContainmentBridge, SecurityAlert, Severity,
     build_containment_bridge_from_env, classify_intent, core_distance, zedd_drift_score,
@@ -89,7 +89,9 @@ impl BaselineInventory {
         for (agent, scope) in parsed.agents {
             match Uuid::parse_str(&agent) {
                 Ok(agent_id) => {
-                    baseline.agent_patterns.insert(agent_id, scope.approved_tools);
+                    baseline
+                        .agent_patterns
+                        .insert(agent_id, scope.approved_tools);
                 }
                 Err(_) => {
                     tracing::warn!(agent = %agent, "skipping invalid agent UUID in MCP baseline inventory");
@@ -331,9 +333,7 @@ impl McpGuard {
             .as_str()
             .to_string();
             let reason = format!("zedd-drift:{drift_score:.4}");
-            let review_id = self
-                .log_review(call, &reason, Some(drift_score))
-                .await?;
+            let review_id = self.log_review(call, &reason, Some(drift_score)).await?;
             let decision = Decision::Quarantine {
                 review_id,
                 reason: reason.clone(),
@@ -345,7 +345,10 @@ impl McpGuard {
             return Ok(decision);
         }
 
-        if let Some(source_agent_id) = self.detect_cross_agent_correlation(call, &args_hash).await? {
+        if let Some(source_agent_id) = self
+            .detect_cross_agent_correlation(call, &args_hash)
+            .await?
+        {
             let reason = format!("cross-agent-correlation:source={source_agent_id}");
             let review_id = self.log_review(call, &reason, None).await?;
             let decision = Decision::Quarantine {
@@ -765,7 +768,11 @@ impl McpGuard {
         };
 
         if block {
-            if let Err(e) = self.containment.terminate_session(&call.agent_id.to_string()).await {
+            if let Err(e) = self
+                .containment
+                .terminate_session(&call.agent_id.to_string())
+                .await
+            {
                 tracing::warn!(error = %e, agent_id = %call.agent_id, "MCP containment terminate_session failed");
             }
             if let Err(e) = self
@@ -858,9 +865,7 @@ fn wildcard_matches(value: &str, pattern: &str) -> bool {
         offset += found + part.len();
     }
 
-    if anchored_end
-        && let Some(last) = parts.last()
-    {
+    if anchored_end && let Some(last) = parts.last() {
         return value.ends_with(last);
     }
 
@@ -869,7 +874,10 @@ fn wildcard_matches(value: &str, pattern: &str) -> bool {
 
 fn policy_matches(policy: &ToolPolicy, call: &McpToolCall) -> bool {
     if let Some(pattern) = policy.tool_name_pattern.as_deref()
-        && !wildcard_matches(&call.tool_name.to_ascii_lowercase(), &pattern.to_ascii_lowercase())
+        && !wildcard_matches(
+            &call.tool_name.to_ascii_lowercase(),
+            &pattern.to_ascii_lowercase(),
+        )
     {
         return false;
     }
@@ -932,11 +940,7 @@ fn json_to_embedding(v: &serde_json::Value) -> Option<Vec<f32>> {
             out.push(f as f32);
         }
     }
-    if out.is_empty() {
-        None
-    } else {
-        Some(out)
-    }
+    if out.is_empty() { None } else { Some(out) }
 }
 
 fn decision_text(decision: &Decision) -> &'static str {

@@ -213,7 +213,7 @@ impl DragonflyClient {
     /// If DragonflyDB is unavailable, stores in the in-memory fallback.
     pub async fn set(&self, key: &str, decision: &CachedDecision, policy: PolicyState) {
         let ttl = policy.ttl();
-        if let Err(_) = self.remote_set(key, decision, ttl).await {
+        if self.remote_set(key, decision, ttl).await.is_err() {
             self.activate_fallback();
             self.fallback.insert(key.to_string(), decision.clone());
         }

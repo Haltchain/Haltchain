@@ -8,7 +8,9 @@ pub use haltchain_operator::crd::agent_profile::{
 pub use haltchain_operator::crd::audit_sink::{
     AuditSink, AuditSinkSpec, AuditSinkStatus, KafkaSinkConfig, WebhookSinkConfig,
 };
-pub use haltchain_operator::crd::policy_set::{ConfigMapRef, PolicySet, PolicySetSpec, PolicySetStatus};
+pub use haltchain_operator::crd::policy_set::{
+    ConfigMapRef, PolicySet, PolicySetSpec, PolicySetStatus,
+};
 
 pub const TEST_NAMESPACE: &str = "test-ns";
 

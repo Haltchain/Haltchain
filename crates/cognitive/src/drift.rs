@@ -46,6 +46,12 @@ pub struct MultiScaleAnalyzer {
     window_sizes: Vec<usize>, // Phrase-level windows (in words)
 }
 
+impl Default for MultiScaleAnalyzer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MultiScaleAnalyzer {
     pub fn new() -> Self {
         Self {
@@ -60,7 +66,7 @@ impl MultiScaleAnalyzer {
 
         windows.push(text.to_string());
 
-        for sentence in text.split(|c| c == '.' || c == '!' || c == '?') {
+        for sentence in text.split(['.', '!', '?']) {
             let trimmed = sentence.trim();
             if !trimmed.is_empty() && trimmed.len() > 10 {
                 windows.push(trimmed.to_string());

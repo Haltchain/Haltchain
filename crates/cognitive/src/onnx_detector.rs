@@ -95,6 +95,12 @@ pub struct OnnxDetector {
     anchor_floor: Mutex<Option<f64>>,
 }
 
+impl Default for OnnxDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OnnxDetector {
     pub fn new() -> Self {
         let detector = Self {
@@ -409,9 +415,8 @@ impl OnnxDetector {
             || (pattern_confidence > (crit_pat - 0.15) && percentile >= crit_cal)
         {
             AlertTier::Critical
-        } else if percentile >= 99.5 && !matches!(context, ContextType::AcademicResearch) {
-            AlertTier::Medium
-        } else if pattern_confidence > med_pat
+        } else if percentile >= 99.5 && !matches!(context, ContextType::AcademicResearch)
+            || pattern_confidence > med_pat
             || (pattern_confidence > (med_pat - 0.15) && percentile >= med_cal)
         {
             AlertTier::Medium
@@ -450,7 +455,7 @@ impl OnnxDetector {
         all_results.push(self.analyze(text));
 
         // Sentence-level windows
-        for sentence in text.split(|c| c == '.' || c == '!' || c == '?') {
+        for sentence in text.split(['.', '!', '?']) {
             let trimmed = sentence.trim();
             if trimmed.len() >= 20 {
                 all_results.push(self.analyze(trimmed));
@@ -668,12 +673,9 @@ impl OnnxDetector {
             };
 
             // Compute multi-scale core distance for query embedding.
-            let agent_k_distances =
-                if let Some(dists) = self.multi_scale_core_distance_vs(&embedding, agent_refs) {
-                    dists
-                } else {
-                    Vec::new()
-                };
+            let agent_k_distances = self
+                .multi_scale_core_distance_vs(&embedding, agent_refs)
+                .unwrap_or_default();
 
             let (percentile, k_distances, raw_score) = if !agent_k_distances.is_empty() {
                 let core_dist = Self::trimmed_mean(&agent_k_distances, 0.2);
@@ -715,9 +717,8 @@ impl OnnxDetector {
                 || (pattern_confidence > (crit_pat - 0.15) && percentile >= crit_cal)
             {
                 AlertTier::Critical
-            } else if percentile >= 99.5 && !matches!(context, ContextType::AcademicResearch) {
-                AlertTier::Medium
-            } else if pattern_confidence > med_pat
+            } else if percentile >= 99.5 && !matches!(context, ContextType::AcademicResearch)
+                || pattern_confidence > med_pat
                 || (pattern_confidence > (med_pat - 0.15) && percentile >= med_cal)
             {
                 AlertTier::Medium

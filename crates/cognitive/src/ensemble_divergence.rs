@@ -72,7 +72,7 @@ impl KCoreDistanceDetector {
             // Get k-th smallest distance (k=20 default)
             point_dists.sort_by(|a, b| a.total_cmp(b));
             let other = n.saturating_sub(1);
-            let max_k = (other / 2).min(100).max(1);
+            let max_k = (other / 2).clamp(1, 100);
             let scales: Vec<f64> = [5usize, 20, 50, 100]
                 .into_iter()
                 .filter(|&k| k <= max_k && k <= other)

@@ -471,8 +471,8 @@ mod tests {
 
     #[tokio::test]
     async fn standalone_mcp_inspect_blocks_exec_shell() {
-        let baseline = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../demo/baseline.json");
+        let baseline =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../demo/baseline.json");
         if baseline.exists() {
             unsafe {
                 std::env::set_var(

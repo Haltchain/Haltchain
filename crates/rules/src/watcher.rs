@@ -113,7 +113,7 @@ impl PolicyStore {
         let snapshot = PolicySnapshot {
             policy: initial.clone(),
             loaded_at: std::time::SystemTime::now(),
-            generation: generation,
+            generation,
         };
         let handle = PolicyHandle::new(initial.clone());
         let mut env_map = std::collections::HashMap::new();
@@ -208,17 +208,16 @@ impl PolicyStore {
         })?;
 
         // Reject downgrade in the target environment
-        if let Some(existing) = env_map.get(&to) {
-            if let Ok(existing_ver) = Version::parse(&existing.version) {
-                if source_ver <= existing_ver {
-                    return Err(format!(
-                        "promotion rejected: {} environment already has version {} >= {}",
-                        to.as_str(),
-                        existing_ver,
-                        source_ver,
-                    ));
-                }
-            }
+        if let Some(existing) = env_map.get(&to)
+            && let Ok(existing_ver) = Version::parse(&existing.version)
+            && source_ver <= existing_ver
+        {
+            return Err(format!(
+                "promotion rejected: {} environment already has version {} >= {}",
+                to.as_str(),
+                existing_ver,
+                source_ver,
+            ));
         }
         drop(env_map);
 

@@ -211,11 +211,11 @@ mod tests {
         let p = vec![0.5, 0.5];
         let q = vec![0.5, 0.5];
         let jsd_same = jensen_shannon_divergence(&p, &q);
-        assert!(jsd_same >= 0.0 && jsd_same <= 1.0);
+        assert!((0.0..=1.0).contains(&jsd_same));
 
         let r = vec![0.9, 0.1];
         let jsd_diff = jensen_shannon_divergence(&p, &r);
-        assert!(jsd_diff >= 0.0 && jsd_diff <= 1.0);
+        assert!((0.0..=1.0).contains(&jsd_diff));
         // Different distributions should have higher JSD
         assert!(jsd_diff > jsd_same);
     }

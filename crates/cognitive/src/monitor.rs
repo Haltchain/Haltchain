@@ -960,7 +960,7 @@ fn l2_normalize(v: &mut [f64]) {
 fn segmentation_windows(trace: &str) -> Vec<String> {
     let mut out = vec![trace.to_string()];
     // 1. Sentence-level segments (existing behaviour)
-    for segment in trace.split(|c| c == '.' || c == '!' || c == '?' || c == ';' || c == ',') {
+    for segment in trace.split(['.', '!', '?', ';', ',']) {
         let s = segment.trim();
         if s.len() >= 16 {
             out.push(s.to_string());
@@ -1182,7 +1182,7 @@ fn detect_multi_turn_escalation(
 ) -> bool {
     // Split on common multi-turn delimiters
     let segments: Vec<&str> = text
-        .split(|c| c == '\n' || c == '|')
+        .split(['\n', '|'])
         .map(|s| s.trim())
         .filter(|s| s.len() >= 10) // Ignore very short fragments
         .collect();

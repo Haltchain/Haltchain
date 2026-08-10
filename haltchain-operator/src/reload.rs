@@ -1,4 +1,6 @@
-use std::collections::{BTreeMap, HashMap};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use hmac::{Hmac, Mac};
 use k8s_openapi::api::core::v1::Pod;
@@ -26,7 +28,11 @@ pub fn webhook_signature(secret: &[u8], body: &[u8]) -> String {
     format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
 }
 
-pub fn pod_matches_policy_set(pod: &Pod, policy_set_name: &str, target_labels: &HashMap<String, String>) -> bool {
+pub fn pod_matches_policy_set(
+    pod: &Pod,
+    policy_set_name: &str,
+    target_labels: &HashMap<String, String>,
+) -> bool {
     let labels = pod.metadata.labels.as_ref();
     let annotations = pod.metadata.annotations.as_ref();
 
@@ -51,7 +57,11 @@ pub fn pod_matches_policy_set(pod: &Pod, policy_set_name: &str, target_labels: &
     }
 
     labels
-        .map(|l| target_labels.iter().all(|(k, v)| l.get(k).map(String::as_str) == Some(v.as_str())))
+        .map(|l| {
+            target_labels
+                .iter()
+                .all(|(k, v)| l.get(k).map(String::as_str) == Some(v.as_str()))
+        })
         .unwrap_or(false)
 }
 

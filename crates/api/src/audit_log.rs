@@ -424,6 +424,7 @@ impl AuditChain {
     ///
     /// `entries` must be in append order. Returns `Ok(head_hex)` with the
     /// resulting chain head if the replay succeeds.
+    #[allow(dead_code)]
     pub fn verify_sequence(entries: &[Vec<u8>], initial_head: [u8; 32]) -> String {
         let mut head = initial_head;
         for entry in entries {

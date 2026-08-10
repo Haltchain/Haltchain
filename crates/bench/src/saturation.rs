@@ -31,7 +31,7 @@ struct Config {
 }
 
 fn make_request(agent_id: usize, seq: usize) -> ValidationRequest {
-    let is_anomaly = seq % 100 == 0;
+    let is_anomaly = seq.is_multiple_of(100);
     ValidationRequest {
         agent_id: format!("sat_agent_{agent_id:05}"),
         api_key: "bench-key".into(),
@@ -338,10 +338,11 @@ fn parse_duration(raw: &str) -> Option<Duration> {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod tests {
-    use super::{parse_duration, percentile_us};
+    #![allow(unused_imports)]
     use std::time::Duration;
+
+    use crate::{parse_duration, percentile_us};
 
     #[test]
     fn parse_duration_variants() {

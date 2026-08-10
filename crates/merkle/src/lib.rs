@@ -79,7 +79,11 @@ fn generate_inclusion_proof(
     let mut idx = leaf_index;
 
     while layer.len() > 1 {
-        let sibling_idx = if idx % 2 == 0 { idx + 1 } else { idx - 1 };
+        let sibling_idx = if idx.is_multiple_of(2) {
+            idx + 1
+        } else {
+            idx - 1
+        };
         let sibling = if sibling_idx < layer.len() {
             layer[sibling_idx]
         } else {
@@ -87,7 +91,7 @@ fn generate_inclusion_proof(
             layer[idx]
         };
 
-        let direction = if idx % 2 == 0 {
+        let direction = if idx.is_multiple_of(2) {
             ProofDirection::Right
         } else {
             ProofDirection::Left

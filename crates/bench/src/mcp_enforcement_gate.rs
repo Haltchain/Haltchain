@@ -69,7 +69,10 @@ async fn main() {
         if ratio > 1.0 {
             println!("  HaltChain is {ratio:.0}x faster than static scanner");
         } else {
-            println!("  Static scanner is {:.0}x faster (HaltChain does more work)", 1.0 / ratio);
+            println!(
+                "  Static scanner is {:.0}x faster (HaltChain does more work)",
+                1.0 / ratio
+            );
         }
     }
 
@@ -172,22 +175,33 @@ async fn bench_haltchain_pipeline(monitor: Arc<CognitiveMonitor>) -> Vec<u64> {
         // Step 1: Pattern firewall (Aho-Corasick — O(n) guaranteed)
         let pattern_match = {
             let ac = aho_corasick::AhoCorasick::new([
-                "exec", "shell", "sudo", "curl", "bash", "rm -rf",
-                "drop database", "token_exfiltration", "credential_dump",
-            ]).unwrap();
+                "exec",
+                "shell",
+                "sudo",
+                "curl",
+                "bash",
+                "rm -rf",
+                "drop database",
+                "token_exfiltration",
+                "credential_dump",
+            ])
+            .unwrap();
             let text = format!("{} {}", call.tool_name, call.tool_args);
             ac.find(&text).is_some()
         };
 
         // Step 2: Intent classification
         let _intent = haltchain_cognitive::classify_intent(
-            0.0,  // drift_score
-            &[],  // behavioral markers
+            0.0, // drift_score
+            &[], // behavioral markers
             &format!("{} {}", call.tool_name, call.tool_args),
         );
 
         // Step 3: Cognitive triage (200+ patterns, keyword analysis)
-        let trace = format!("Agent calls tool {} with args {}", call.tool_name, call.tool_args);
+        let trace = format!(
+            "Agent calls tool {} with args {}",
+            call.tool_name, call.tool_args
+        );
         let meta = ReasoningMetadata::from_trace(&trace);
         let _assessment = monitor.triage(&meta, &trace);
 
@@ -214,14 +228,52 @@ fn bench_pattern_firewall() -> Vec<u64> {
 
     // Build a realistic pattern set (200+ patterns like the production firewall)
     let mut all_patterns: Vec<String> = vec![
-        "exec", "shell", "sudo", "curl", "bash", "rm -rf", "drop database",
-        "token_exfiltration", "credential_dump", "wget", "nc", "ncat", "netcat",
-        "eval(", "system(", "os.system", "subprocess", "__import__", "pickle",
-        "marshal", "base64_decode", "reverse_shell", "bind_shell", "meterpreter",
-        "mimikatz", "bloodhound", "lazagne", "crackmapexec", "evil-winrm",
-        "psexec", "wmiexec", "smbexec", "dcomexec", "atexec", "registry",
-        "service", "task", "scheduled", "persist", "exfil", "c2", "beacon",
-    ].into_iter().map(String::from).collect();
+        "exec",
+        "shell",
+        "sudo",
+        "curl",
+        "bash",
+        "rm -rf",
+        "drop database",
+        "token_exfiltration",
+        "credential_dump",
+        "wget",
+        "nc",
+        "ncat",
+        "netcat",
+        "eval(",
+        "system(",
+        "os.system",
+        "subprocess",
+        "__import__",
+        "pickle",
+        "marshal",
+        "base64_decode",
+        "reverse_shell",
+        "bind_shell",
+        "meterpreter",
+        "mimikatz",
+        "bloodhound",
+        "lazagne",
+        "crackmapexec",
+        "evil-winrm",
+        "psexec",
+        "wmiexec",
+        "smbexec",
+        "dcomexec",
+        "atexec",
+        "registry",
+        "service",
+        "task",
+        "scheduled",
+        "persist",
+        "exfil",
+        "c2",
+        "beacon",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
 
     // Pad to 200+ patterns
     for i in 0..200 {
