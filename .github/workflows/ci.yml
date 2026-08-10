@@ -116,7 +116,8 @@ jobs:
             migrations/013_mcp_guard_schema.sql \
             migrations/014_mcp_policy_engine.sql \
             migrations/015_concurrency_hardening_and_phase2_prep.sql \
-            migrations/016_backfill_null_org_rows.sql; do
+            migrations/016_backfill_null_org_rows.sql \
+            migrations/017_rls_hot_tables.sql; do
             psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
           done
       - name: Build API
@@ -196,7 +197,8 @@ jobs:
             migrations/013_mcp_guard_schema.sql \
             migrations/014_mcp_policy_engine.sql \
             migrations/015_concurrency_hardening_and_phase2_prep.sql \
-            migrations/016_backfill_null_org_rows.sql; do
+            migrations/016_backfill_null_org_rows.sql \
+            migrations/017_rls_hot_tables.sql; do
             psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
           done
       - name: Build API
@@ -304,7 +306,8 @@ jobs:
             migrations/013_mcp_guard_schema.sql \
             migrations/014_mcp_policy_engine.sql \
             migrations/015_concurrency_hardening_and_phase2_prep.sql \
-            migrations/016_backfill_null_org_rows.sql; do
+            migrations/016_backfill_null_org_rows.sql \
+            migrations/017_rls_hot_tables.sql; do
             psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
           done
 
