@@ -24,7 +24,7 @@ fn serve_health_and_check() {
         .rsplit(':')
         .next()
         .and_then(|s| s.parse().ok())
-        .expect(&format!("failed to parse port from: {first_line:?}"));
+        .unwrap_or_else(|| panic!("failed to parse port from: {first_line:?}"));
 
     // poll until the port accepts connections (max 3s)
     let deadline = Instant::now() + Duration::from_secs(3);
@@ -51,7 +51,10 @@ fn serve_health_and_check() {
     let body: serde_json::Value = check.into_json().expect("json body");
     // With no baseline, read_file now returns "block" (no-baseline-configured).
     // That is the correct fail-closed behaviour — test that it blocks, not allows.
-    assert_eq!(body["decision"], "block", "expected block with no baseline: {body}");
+    assert_eq!(
+        body["decision"], "block",
+        "expected block with no baseline: {body}"
+    );
 
     let blocked = ureq::post(&format!("http://127.0.0.1:{port}/check"))
         .send_json(ureq::json!({"tool": "exec_shell", "args": "{\"cmd\":\"rm -rf /\"}"}))

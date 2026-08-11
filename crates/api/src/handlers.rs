@@ -1649,7 +1649,10 @@ async fn audit_fts_search(
     };
 
     match db_backend.as_postgres() {
-        Some(pg) => match pg.search_audit_decisions_scoped(org_id, &body.q, limit).await {
+        Some(pg) => match pg
+            .search_audit_decisions_scoped(org_id, &body.q, limit)
+            .await
+        {
             Ok(results) => {
                 let rows: Vec<_> = results
                     .iter()
@@ -1747,7 +1750,8 @@ async fn admin_policy_db_reload(
                         "policy_name": body.policy_name,
                         "version": version,
                         "readable": readable
-                    })).into_response()
+                    }))
+                    .into_response()
                 }
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,

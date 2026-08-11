@@ -159,6 +159,61 @@ pub use types::{
     ScanTier, ThresholdPatch, ValidationRequest, ValidationResponse,
 };
 
+/// Whether `HALTCHAIN_QUORUM_FAIL_OPEN` is honoured in this environment.
+///
+/// The flag lets a high-stakes action through without cluster agreement, so in
+/// production it is ignored unless the operator also sets
+/// `HALTCHAIN_QUORUM_FAIL_OPEN_ACK_UNSAFE=1`. Outside production it works as before.
+pub fn quorum_fail_open_allowed() -> bool {
+    let truthy = |name: &str| {
+        std::env::var(name)
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+            .unwrap_or(false)
+    };
+    if !truthy("HALTCHAIN_QUORUM_FAIL_OPEN") {
+        return false;
+    }
+    let is_production = std::env::var("HALTCHAIN_ENV")
+        .map(|v| v.eq_ignore_ascii_case("production"))
+        .unwrap_or(false);
+    if is_production && !truthy("HALTCHAIN_QUORUM_FAIL_OPEN_ACK_UNSAFE") {
+        tracing::error!(
+            "HALTCHAIN_QUORUM_FAIL_OPEN ignored in production: set \
+             HALTCHAIN_QUORUM_FAIL_OPEN_ACK_UNSAFE=1 to accept quorum bypass. Failing closed."
+        );
+        return false;
+    }
+    true
+}
+
+/// HC011 — quorum bypass. Emitted every time a high-stakes action is allowed
+/// without cluster agreement so SIEM can alert instead of only a log line.
+fn emit_quorum_bypass_cef(transaction_id: &str, agent_id: &str, amount_cents: u64) {
+    let escape = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('=', "\\=")
+            .replace('\n', "\\n")
+    };
+    let line = format!(
+        "CEF:0|HaltChain|Validator|{}|HC011|Quorum Bypass|9|rt={rt} act=allow_without_quorum \
+         suid={agent} cs1={txn} cs1Label=transactionId cn1={amount} cn1Label=amountCents",
+        env!("CARGO_PKG_VERSION"),
+        rt = escape(&Utc::now().to_rfc3339()),
+        agent = escape(agent_id),
+        txn = escape(transaction_id),
+        amount = amount_cents,
+    );
+    tracing::warn!(cef_line = %line, cef_sig = "HC011", "SIEM CEF");
+    tracing::warn!(
+        txn = %transaction_id,
+        agent_id = %agent_id,
+        amount_cents,
+        cef_sig = "HC011",
+        "QUORUM_BYPASS: high-stakes action allowed without cluster agreement \
+         (HALTCHAIN_QUORUM_FAIL_OPEN)"
+    );
+}
+
 /// Deployment profile controlling resource expectations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeployProfile {
@@ -623,7 +678,13 @@ impl AppState {
             let status = pg.extension_health().await;
             for (ext, ok) in &status {
                 if !ok {
-                    pg.record_circuit_event(ext, "failure", Some("extension unavailable at health check"), None).await;
+                    pg.record_circuit_event(
+                        ext,
+                        "failure",
+                        Some("extension unavailable at health check"),
+                        None,
+                    )
+                    .await;
                 }
             }
             return status;
@@ -910,8 +971,8 @@ impl AppState {
                         tracing::warn!("action_embedding persist failed: {e}");
                     }
                     // persist drift snapshot so drift_counters_hot is not write-only
-                    if let Some(ref d) = drift_opt {
-                        if let Err(e) = pg_db
+                    if let Some(ref d) = drift_opt
+                        && let Err(e) = pg_db
                             .upsert_drift_counter(
                                 &agent_id_for_drift,
                                 decision_org_id,
@@ -920,9 +981,8 @@ impl AppState {
                                 60,
                             )
                             .await
-                        {
-                            tracing::warn!("drift_counter upsert failed: {e}");
-                        }
+                    {
+                        tracing::warn!("drift_counter upsert failed: {e}");
                     }
                 }
             });
@@ -1821,16 +1881,9 @@ impl AppState {
                 QuorumTracker::with_cluster(&transaction_id, self.cluster_size, effective_quorum);
             tracker.approve(self.node_id);
             if !matches!(tracker.decision(), QuorumDecision::Approved) {
-                let fail_open = std::env::var("HALTCHAIN_QUORUM_FAIL_OPEN")
-                    .map(|v| {
-                        v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
-                    })
-                    .unwrap_or(false);
+                let fail_open = quorum_fail_open_allowed();
                 if fail_open {
-                    tracing::warn!(
-                        txn = %transaction_id,
-                        "HALTCHAIN_QUORUM_FAIL_OPEN: allowing without quorum (alert only)"
-                    );
+                    emit_quorum_bypass_cef(&transaction_id, &req.agent_id, amount_cents);
                 } else {
                     let actions = agent.current_action_count();
                     return ValidationResponse {

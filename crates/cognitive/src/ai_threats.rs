@@ -630,7 +630,9 @@ impl CommandContainmentBridge {
     fn run_or_noop(cmd: &Option<String>, agent_id: &str, reason: &str) -> Result<String, String> {
         match cmd {
             Some(c) if !c.trim().is_empty() => Self::run_template(c, agent_id, reason),
-            _ => Err(format!("containment-noop: no command configured for {reason} on agent {agent_id}")),
+            _ => Err(format!(
+                "containment-noop: no command configured for {reason} on agent {agent_id}"
+            )),
         }
     }
 }

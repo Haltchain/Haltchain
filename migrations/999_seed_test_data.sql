@@ -10,8 +10,8 @@ INSERT INTO decisions_hot (transaction_id, agent_id, decision, domain, policy_co
 SELECT 
     gen_random_uuid(),
     'agent-' || (random() * 5)::int,
-    (ARRAY['ALLOW', 'DENY', 'CIRCUIT_BREAK', 'GOAL_CLARIFICATION_REQUIRED'])[1 + (random() * 3)::int],
-    (ARRAY['financial', 'privacy', 'security', 'operational'])[1 + (random() * 3)::int],
+    (ARRAY['ALLOW', 'DENY', 'CIRCUIT_BREAK', 'GOAL_CLARIFICATION_REQUIRED'])[1 + (random() * 3)::int]::policy_result,
+    (ARRAY['financial', 'privacy', 'security', 'operational'])[1 + (random() * 3)::int]::breaker_domain,
     (ARRAY['MAX_TRANSFER_USD', 'RATE_LIMIT', 'SENSITIVE_DATA'])[1 + (random() * 2)::int],
     'Test decision reason',
     now() - (random() * interval '30 days')
@@ -21,7 +21,7 @@ FROM generate_series(1, 100);
 INSERT INTO decision_outcomes (transaction_id, outcome, impact_usd, reviewer_id, reviewer_notes)
 SELECT 
     d.transaction_id,
-    (ARRAY['TRUE_POSITIVE', 'FALSE_POSITIVE', 'EXPECTED_EDGE_CASE'])[1 + (random() * 2)::int],
+    (ARRAY['TRUE_POSITIVE', 'FALSE_POSITIVE', 'EXPECTED_EDGE_CASE'])[1 + (random() * 2)::int]::outcome_type,
     (random() * 10000 - 1000)::numeric(14,2),
     'reviewer-' || (random() * 3)::int,
     'Sample review notes'

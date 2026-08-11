@@ -34,6 +34,9 @@ fn database_url() -> Option<String> {
     match std::env::var("DATABASE_URL") {
         Ok(url) if !url.is_empty() => Some(url),
         _ => {
+            if require_db_tests() {
+                panic!("DATABASE_URL is unset but HALTCHAIN_REQUIRE_DB_TESTS is set");
+            }
             eprintln!("DATABASE_URL not set — skipping integration test");
             None
         }
@@ -57,30 +60,78 @@ async fn connect_or_skip() -> Option<Arc<DbStore>> {
 
     // Use a fresh pool per test to avoid cross-test session/connection state
     // affecting subsequent integration cases.
-    let pool = tokio::time::timeout(
-        StdDuration::from_secs(20),
+    // Wait a long time when the DB is required; fail fast on a dev box.
+    let connect_timeout = if require_db_tests() {
+        StdDuration::from_secs(20)
+    } else {
+        StdDuration::from_secs(3)
+    };
+    let connected = tokio::time::timeout(
+        connect_timeout,
         PgPoolOptions::new()
             .max_connections(8)
             .min_connections(1)
-            .acquire_timeout(StdDuration::from_secs(20))
+            .acquire_timeout(connect_timeout)
             .idle_timeout(StdDuration::from_secs(120))
             .max_lifetime(StdDuration::from_secs(900))
             .test_before_acquire(true)
             .connect(&url),
     )
-    .await
-    .unwrap_or_else(|_| {
-        panic!(
-            "failed to connect to test DB: timed out after 20s; for RDS also verify security groups and sslmode=require"
-        )
-    })
-    .unwrap_or_else(|err| {
-        panic!(
-            "failed to connect to test DB: {err}; if this is RDS, verify reachability, credentials, and sslmode=require"
-        )
-    });
+    .await;
 
-    Some(Arc::new(DbStore::from_pool(pool)))
+    // A dev box with no Postgres should skip, not fail. CI sets
+    // HALTCHAIN_REQUIRE_DB_TESTS=1 so an unreachable DB there is still a hard error.
+    let err_msg = match connected {
+        Ok(Ok(pool)) => {
+            // Connecting isn't enough: a dev box may point at a database that
+            // never had migrations applied. Probe for a core table first.
+            let has_schema: bool = sqlx::query_scalar(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.tables \
+                 WHERE table_name = 'decisions_hot')",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(false);
+
+            if has_schema {
+                return Some(Arc::new(DbStore::from_pool(pool)));
+            }
+            if require_db_tests() {
+                panic!(
+                    "connected to the test DB but 'decisions_hot' is missing; \
+                     apply migrations/0*.sql before running integration tests"
+                );
+            }
+            eprintln!(
+                "skipping integration test: connected but schema is not applied \
+                 (run migrations/0*.sql)"
+            );
+            return None;
+        }
+        Ok(Err(err)) => format!("{err}"),
+        Err(_) => format!("timed out after {}s", connect_timeout.as_secs()),
+    };
+
+    if require_db_tests() {
+        panic!(
+            "failed to connect to test DB: {err_msg}. HALTCHAIN_REQUIRE_DB_TESTS is set, so this \
+             is a hard failure. For RDS verify reachability, credentials, and sslmode=require."
+        );
+    }
+
+    eprintln!(
+        "skipping integration test: Postgres unreachable ({err_msg}). \
+         Set HALTCHAIN_REQUIRE_DB_TESTS=1 to make this a failure instead."
+    );
+    None
+}
+
+/// CI sets this so a missing/broken Postgres fails the build instead of silently skipping.
+fn require_db_tests() -> bool {
+    load_test_env();
+    std::env::var("HALTCHAIN_REQUIRE_DB_TESTS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// A random agent ID so parallel test runs don't collide.
@@ -269,13 +320,28 @@ async fn test_upsert_goal_embedding() {
         .expect("expected Some embedding");
 
     assert_eq!(stored.len(), 1024);
-    // The stored embedding should match the *second* write.
+    // Embeddings are L2-normalized on write so cosine distance works, so compare
+    // against the normalized form of the second write, not the raw input.
+    let expected = l2_normalize(&shifted);
     let max_diff = stored
         .iter()
-        .zip(shifted.iter())
+        .zip(expected.iter())
         .map(|(a, b)| (a - b).abs())
         .fold(0.0_f32, f32::max);
     assert!(max_diff < 1e-5, "embedding mismatch, max_diff = {max_diff}");
+}
+
+/// Mirrors the private `normalize_embedding` applied by the write path.
+fn l2_normalize(v: &[f32]) -> Vec<f32> {
+    let norm = v
+        .iter()
+        .map(|x| (*x as f64) * (*x as f64))
+        .sum::<f64>()
+        .sqrt();
+    if norm <= f64::EPSILON {
+        return v.to_vec();
+    }
+    v.iter().map(|x| ((*x as f64) / norm) as f32).collect()
 }
 
 // ─── Test 3: find_similar_actions (cosine KNN) ───────────────────────────────
@@ -492,6 +558,18 @@ async fn test_pg_cron_promotes_telemetry_hot_to_durable() {
         return;
     };
 
+    // pg_cron is an optional extension (see migration 009). Without it the
+    // app-side TelemetryHotWriter does promotion, so skip rather than fail.
+    let has_pg_cron: (bool,) =
+        sqlx::query_as("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron')")
+            .fetch_one(db.pool())
+            .await
+            .expect("failed to probe pg_extension");
+    if !has_pg_cron.0 {
+        eprintln!("skipping: pg_cron not installed on this server");
+        return;
+    }
+
     let cron_jobs: (i64,) =
         sqlx::query_as("SELECT count(*) FROM cron.job WHERE jobname = 'telemetry-promote'")
             .fetch_one(db.pool())
@@ -649,10 +727,7 @@ async fn test_fts_scoped_cross_tenant_isolation() {
 
     let org_a = Uuid::new_v4();
     let org_b = Uuid::new_v4();
-    let unique_token = format!(
-        "crosstenant{}",
-        Uuid::new_v4().to_string().replace('-', "")
-    );
+    let unique_token = format!("crosstenant{}", Uuid::new_v4().to_string().replace('-', ""));
 
     let rec = DecisionRecord {
         transaction_id: Uuid::new_v4(),

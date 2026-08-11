@@ -68,6 +68,20 @@ pub struct DbStore {
     telemetry_hot_writer: TelemetryHotWriter,
 }
 
+/// Postgres serialization_failure. SERIALIZABLE transactions are allowed to
+/// abort with this under concurrency; the caller is expected to retry.
+fn is_serialization_failure(e: &DbError) -> bool {
+    match e {
+        DbError::Sqlx(sqlx::Error::Database(db)) => {
+            matches!(db.code().as_deref(), Some("40001") | Some("40P01"))
+        }
+        _ => false,
+    }
+}
+
+/// Number of attempts for SERIALIZABLE writes before giving up.
+const SERIALIZABLE_MAX_ATTEMPTS: u32 = 5;
+
 pub struct DecisionRecord {
     pub transaction_id: Uuid,
     pub org_id: Option<Uuid>,
@@ -327,7 +341,29 @@ impl DbStore {
         Ok(())
     }
 
+    /// Insert a hash-chained decision, retrying if the SERIALIZABLE transaction
+    /// aborts because a concurrent insert touched the same chain tip.
     pub async fn insert_decision(&self, r: &DecisionRecord) -> Result<i64, DbError> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.insert_decision_once(r).await {
+                Ok(id) => return Ok(id),
+                Err(e) if is_serialization_failure(&e) && attempt < SERIALIZABLE_MAX_ATTEMPTS => {
+                    tracing::debug!(
+                        attempt,
+                        txn = %r.transaction_id,
+                        "decision insert hit serialization failure; retrying"
+                    );
+                    // brief backoff so the competing writer can commit first
+                    tokio::time::sleep(std::time::Duration::from_millis(5 * attempt as u64)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn insert_decision_once(&self, r: &DecisionRecord) -> Result<i64, DbError> {
         Self::ensure_write_org_id(r.org_id)?;
         let write_org_id = Self::normalize_write_org_id(r.org_id);
         // ── Postgres append-only hash chaining (Section C) ────────────────────
@@ -419,6 +455,29 @@ impl DbStore {
 
     /// Same hash-chained decision insert as [`Self::insert_decision`], plus drift row in one SERIALIZABLE tx (Roadmap E).
     pub async fn insert_decision_with_drift(
+        &self,
+        r: &DecisionRecord,
+        drift: &DriftLogRecord,
+    ) -> Result<i64, DbError> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.insert_decision_with_drift_once(r, drift).await {
+                Ok(id) => return Ok(id),
+                Err(e) if is_serialization_failure(&e) && attempt < SERIALIZABLE_MAX_ATTEMPTS => {
+                    tracing::debug!(
+                        attempt,
+                        txn = %r.transaction_id,
+                        "decision+drift insert hit serialization failure; retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(5 * attempt as u64)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn insert_decision_with_drift_once(
         &self,
         r: &DecisionRecord,
         drift: &DriftLogRecord,

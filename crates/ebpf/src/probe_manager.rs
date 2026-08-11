@@ -21,12 +21,18 @@ pub enum ProbeError {
     UnsupportedPlatform,
     #[error("probe load error: {0}")]
     Load(String),
+    #[error(
+        "enforcement is disabled; set ProbeConfig::enforce_deny = true to arm the BPF deny map"
+    )]
+    EnforcementDisabled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProbeConfig {
     pub target_syscalls: Vec<String>,
     pub ring_buf_capacity: usize,
+    /// Arms the BPF deny map. When false (default) the probes are
+    /// observability-only and `block_comm` refuses to write policy entries.
     pub enforce_deny: bool,
 }
 
@@ -243,6 +249,8 @@ impl ProbeManager {
             "target_syscalls": self.config.target_syscalls,
             "attached_targets": self.attached_targets,
             "object_path": self.object_path,
+            "enforce_deny": self.config.enforce_deny,
+            "enforcement_active": self.enforcement_active(),
             "phase": "phase2",
         })
     }
@@ -302,11 +310,21 @@ impl ProbeManager {
     }
 
     /// Insert a comm name into the BLOCKED_COMMS policy map so the eBPF
-    /// kprobe will deny syscalls from that process. No-op without kernel feature.
+    /// kprobe will deny syscalls from that process.
+    ///
+    /// Refuses unless `ProbeConfig::enforce_deny` is set, so a caller cannot
+    /// believe it armed enforcement while the manager is in observability mode.
     #[cfg(all(feature = "kernel", target_os = "linux"))]
     pub fn block_comm(&mut self, comm: &str) -> Result<(), ProbeError> {
         use aya::maps::HashMap;
-        let bpf = self.bpf.as_mut().ok_or_else(|| ProbeError::Load("probe not loaded".into()))?;
+        if !self.config.enforce_deny {
+            self.push_event("probe_manager", format!("BLOCK_COMM_REFUSED:{comm}"));
+            return Err(ProbeError::EnforcementDisabled);
+        }
+        let bpf = self
+            .bpf
+            .as_mut()
+            .ok_or_else(|| ProbeError::Load("probe not loaded".into()))?;
         let mut map: HashMap<_, [u8; 16], u8> = bpf
             .map_mut("blocked_comms")
             .map_err(|e| ProbeError::Load(format!("blocked_comms map: {e}")))?
@@ -323,12 +341,27 @@ impl ProbeManager {
     }
 
     #[cfg(not(all(feature = "kernel", target_os = "linux")))]
-    pub fn block_comm(&mut self, _comm: &str) -> Result<(), ProbeError> {
+    pub fn block_comm(&mut self, comm: &str) -> Result<(), ProbeError> {
+        if !self.config.enforce_deny {
+            self.push_event("probe_manager", format!("BLOCK_COMM_REFUSED:{comm}"));
+            return Err(ProbeError::EnforcementDisabled);
+        }
         Err(ProbeError::KernelFeatureDisabled)
+    }
+
+    /// True when the deny map is armed AND the kernel path is actually compiled in.
+    /// Observability-only builds always report false.
+    pub fn enforcement_active(&self) -> bool {
+        self.config.enforce_deny
+            && cfg!(feature = "kernel")
+            && cfg!(target_os = "linux")
+            && self.running
     }
 }
 
 /// Mirror of the SyscallEvent C struct from the BPF program.
+/// Only used when reading the ring buffer on the Linux kernel path.
+#[cfg(all(feature = "kernel", target_os = "linux"))]
 #[repr(C)]
 struct RawSyscallEvent {
     pid: u32,
@@ -338,6 +371,7 @@ struct RawSyscallEvent {
     ts_ns: u64,
 }
 
+#[cfg(all(feature = "kernel", target_os = "linux"))]
 fn bytes_to_str(b: &[u8; 16]) -> String {
     let end = b.iter().position(|&c| c == 0).unwrap_or(16);
     String::from_utf8_lossy(&b[..end]).to_string()
@@ -360,6 +394,33 @@ mod tests {
 
         let drained = manager.poll_events().await;
         assert!(drained.is_empty());
+    }
+
+    #[test]
+    fn block_comm_refused_when_enforce_deny_is_false() {
+        let mut manager = ProbeManager::new(ProbeConfig::default());
+        assert!(
+            !manager.config.enforce_deny,
+            "default must stay observability-only"
+        );
+        let err = manager.block_comm("rogue_agent").unwrap_err();
+        assert!(
+            matches!(err, ProbeError::EnforcementDisabled),
+            "expected EnforcementDisabled, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn enforcement_active_is_false_without_kernel_feature() {
+        let config = ProbeConfig {
+            enforce_deny: true,
+            ..ProbeConfig::default()
+        };
+        let manager = ProbeManager::new(config);
+        // enforce_deny alone must not claim active enforcement
+        assert!(!manager.enforcement_active());
+        assert_eq!(manager.status()["enforce_deny"], true);
+        assert_eq!(manager.status()["enforcement_active"], false);
     }
 
     #[test]
