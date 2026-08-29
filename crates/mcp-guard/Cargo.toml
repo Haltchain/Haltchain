@@ -2,6 +2,9 @@
 name = "haltchain-mcp-guard"
 version = "0.1.0"
 edition = "2024"
+description = "MCP (Model Context Protocol) enforcement and scanning"
+license = "MIT"
+repository = "https://github.com/Haltchain/HaltChain"
 
 [[bin]]
 name = "haltchain-mcp"

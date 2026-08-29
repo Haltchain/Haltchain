@@ -268,14 +268,14 @@ fn conversation_drift_detects_semantic_pivot() {
             conversation_id: format!("conv-{i}"),
             embedding: embed(&text),
         });
-        if let Some(r) = &report {
-            if worst_report.as_ref().is_none_or(
+        if let Some(r) = &report
+            && worst_report.as_ref().is_none_or(
                 |prev: &haltchain_embeddings::ConversationDriftReport| {
                     r.semantic_drift > prev.semantic_drift
                 },
-            ) {
-                worst_report = report;
-            }
+            )
+        {
+            worst_report = report;
         }
     }
 
@@ -328,15 +328,14 @@ fn behavioral_fingerprint_catches_action_pattern_change() {
             steps,
             embedding: embed(&text),
         });
-        if let Some(r) = &report {
-            if worst
+        if let Some(r) = &report
+            && worst
                 .as_ref()
                 .is_none_or(|prev: &haltchain_embeddings::BehaviorDriftReport| {
                     r.behavioral_drift > prev.behavioral_drift
                 })
-            {
-                worst = report;
-            }
+        {
+            worst = report;
         }
     }
 

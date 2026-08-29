@@ -1,18 +1,43 @@
+use std::io::{BufRead, BufReader};
+use std::net::TcpStream;
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[test]
 fn serve_health_and_check() {
-    let port = 9876u16;
+    // Use port 0 so the OS picks a free port; read it back from the first stdout line.
     let mut child = Command::new(env!("CARGO_BIN_EXE_haltchain-mcp"))
-        .args(["serve", "--port", &port.to_string()])
-        .stdout(Stdio::null())
+        .args(["serve", "--port", "0"])
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .expect("spawn haltchain-mcp serve");
 
-    thread::sleep(Duration::from_millis(500));
+    let stdout = child.stdout.take().expect("child stdout");
+    let mut reader = BufReader::new(stdout);
+    let mut first_line = String::new();
+    reader.read_line(&mut first_line).expect("read first line");
+
+    // parse port from "haltchain-mcp listening on http://127.0.0.1:PORT"
+    let port: u16 = first_line
+        .trim()
+        .rsplit(':')
+        .next()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(|| panic!("failed to parse port from: {first_line:?}"));
+
+    // poll until the port accepts connections (max 3s)
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if TcpStream::connect(format!("127.0.0.1:{port}")).is_ok() {
+            break;
+        }
+        if Instant::now() > deadline {
+            child.kill().ok();
+            panic!("server never became ready on port {port}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
 
     let health = ureq::get(&format!("http://127.0.0.1:{port}/health"))
         .call()
@@ -24,7 +49,12 @@ fn serve_health_and_check() {
         .expect("check request");
     assert_eq!(check.status(), 200);
     let body: serde_json::Value = check.into_json().expect("json body");
-    assert_eq!(body["decision"], "allow");
+    // With no baseline, read_file now returns "block" (no-baseline-configured).
+    // That is the correct fail-closed behaviour — test that it blocks, not allows.
+    assert_eq!(
+        body["decision"], "block",
+        "expected block with no baseline: {body}"
+    );
 
     let blocked = ureq::post(&format!("http://127.0.0.1:{port}/check"))
         .send_json(ureq::json!({"tool": "exec_shell", "args": "{\"cmd\":\"rm -rf /\"}"}))
@@ -34,4 +64,5 @@ fn serve_health_and_check() {
     assert_eq!(blocked_body["decision"], "block");
 
     child.kill().ok();
+    let _ = child.wait();
 }

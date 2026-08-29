@@ -34,29 +34,29 @@ impl TelemetryHotWriter {
                         match msg {
                             Some(record) => {
                                 pending.push(record);
-                                if pending.len() >= flush_batch_size {
-                                    if let Err(err) = flush_batch(&pool, &mut pending).await {
-                                        tracing::warn!("telemetry_hot batch flush failed: {err}");
-                                        pending.clear();
-                                    }
+                                if pending.len() >= flush_batch_size
+                                    && let Err(err) = flush_batch(&pool, &mut pending).await
+                                {
+                                    tracing::warn!("telemetry_hot batch flush failed: {err}");
+                                    pending.clear();
                                 }
                             }
                             None => {
-                                if !pending.is_empty() {
-                                    if let Err(err) = flush_batch(&pool, &mut pending).await {
-                                        tracing::warn!("telemetry_hot final flush failed: {err}");
-                                    }
+                                if !pending.is_empty()
+                                    && let Err(err) = flush_batch(&pool, &mut pending).await
+                                {
+                                    tracing::warn!("telemetry_hot final flush failed: {err}");
                                 }
                                 break;
                             }
                         }
                     }
                     _ = ticker.tick() => {
-                        if !pending.is_empty() {
-                            if let Err(err) = flush_batch(&pool, &mut pending).await {
-                                tracing::warn!("telemetry_hot timed flush failed: {err}");
-                                pending.clear();
-                            }
+                        if !pending.is_empty()
+                            && let Err(err) = flush_batch(&pool, &mut pending).await
+                        {
+                            tracing::warn!("telemetry_hot timed flush failed: {err}");
+                            pending.clear();
                         }
                     }
                 }
@@ -77,7 +77,7 @@ impl TelemetryHotWriter {
             Err(mpsc::error::TrySendError::Full(msg)) => {
                 if self.drop_on_full {
                     let dropped = self.dropped_count.fetch_add(1, Ordering::Relaxed) + 1;
-                    if dropped == 1 || dropped % 1_000 == 0 {
+                    if dropped == 1 || dropped.is_multiple_of(1_000) {
                         tracing::warn!(
                             dropped,
                             "telemetry_hot queue full; dropping fire-and-forget telemetry writes"

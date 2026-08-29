@@ -51,7 +51,9 @@ impl BaselineInventory {
         }
         for (agent, scope) in parsed.agents {
             if let Ok(agent_id) = Uuid::parse_str(&agent) {
-                baseline.agent_patterns.insert(agent_id, scope.approved_tools);
+                baseline
+                    .agent_patterns
+                    .insert(agent_id, scope.approved_tools);
             }
         }
         Some(baseline)
@@ -124,6 +126,8 @@ pub struct LiteInspectResult {
 pub struct LiteMcpGuard {
     pattern_firewall: AhoCorasick,
     baseline: Option<BaselineInventory>,
+    // true when no baseline is configured AND HALTCHAIN_LITE_FAIL_OPEN=1
+    fail_open_without_baseline: bool,
     signing: SigningService,
     merkle: MerkleAccumulator,
 }
@@ -132,7 +136,13 @@ impl LiteMcpGuard {
     pub fn from_env() -> Self {
         let extra = std::env::var("HALTCHAIN_MCP_BLOCKED_TOOLS").unwrap_or_default();
         let mut patterns = vec![
-            "exec", "shell", "sudo", "curl", "bash", "rm -rf", "drop database",
+            "exec",
+            "shell",
+            "sudo",
+            "curl",
+            "bash",
+            "rm -rf",
+            "drop database",
         ]
         .into_iter()
         .map(str::to_string)
@@ -140,9 +150,42 @@ impl LiteMcpGuard {
         for p in extra.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             patterns.push(p.to_ascii_lowercase());
         }
+        let baseline = BaselineInventory::from_env();
+        let fail_open_without_baseline = Self::fail_open_from_env(&baseline);
         Self {
             pattern_firewall: AhoCorasick::new(patterns).expect("lite pattern set"),
-            baseline: BaselineInventory::from_env(),
+            baseline,
+            fail_open_without_baseline,
+            signing: SigningService::generate(),
+            merkle: MerkleAccumulator::new(),
+        }
+    }
+
+    fn fail_open_from_env(baseline: &Option<BaselineInventory>) -> bool {
+        // Only allow fail-open when:
+        // - no baseline path was configured at all, AND
+        // - the operator explicitly opted in via HALTCHAIN_LITE_FAIL_OPEN=1
+        if baseline.is_some() {
+            return false;
+        }
+        let baseline_path_set = std::env::var("HALTCHAIN_MCP_BASELINE_PATH")
+            .map(|v| !v.trim().is_empty())
+            .unwrap_or(false);
+        if baseline_path_set {
+            return false; // path was set but file unreadable; treat as fail-closed
+        }
+        std::env::var("HALTCHAIN_LITE_FAIL_OPEN")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    fn new_for_test(fail_open_without_baseline: bool) -> Self {
+        Self {
+            pattern_firewall: AhoCorasick::new(vec!["exec", "shell", "sudo", "rm -rf"])
+                .expect("test pattern set"),
+            baseline: None,
+            fail_open_without_baseline,
             signing: SigningService::generate(),
             merkle: MerkleAccumulator::new(),
         }
@@ -169,8 +212,14 @@ impl LiteMcpGuard {
             } else {
                 Decision::Allow
             }
-        } else {
+        } else if self.fail_open_without_baseline {
             Decision::Allow
+        } else {
+            // No baseline loaded and fail-open not explicitly enabled — block.
+            Decision::Block {
+                reason: "no-baseline-configured".to_string(),
+                intent: Some("unconfigured".to_string()),
+            }
         };
 
         let txn = Uuid::new_v4().to_string();
@@ -214,7 +263,42 @@ mod tests {
             timestamp: 0,
         };
         let out = g.inspect(&call);
+        // blocked by pattern firewall even without baseline
         assert!(matches!(out.decision, Decision::Block { .. }));
         assert!(!out.proof.merkle_root.is_empty());
+    }
+
+    #[test]
+    fn blocks_unknown_tool_when_no_baseline_configured() {
+        let mut g = LiteMcpGuard::new_for_test(false); // fail_open=false
+        let call = McpToolCall {
+            agent_id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            tool_name: "read_file".to_string(),
+            tool_args: serde_json::json!({}),
+            context_hash: "demo".to_string(),
+            timestamp: 0,
+        };
+        let out = g.inspect(&call);
+        assert!(
+            matches!(&out.decision, Decision::Block { reason, .. } if reason == "no-baseline-configured"),
+            "expected no-baseline-configured block, got {:?}",
+            out.decision
+        );
+    }
+
+    #[test]
+    fn allows_with_explicit_fail_open_and_no_baseline() {
+        let mut g = LiteMcpGuard::new_for_test(true); // fail_open=true
+        let call = McpToolCall {
+            agent_id: Uuid::new_v4(),
+            org_id: Uuid::new_v4(),
+            tool_name: "read_file".to_string(),
+            tool_args: serde_json::json!({}),
+            context_hash: "demo".to_string(),
+            timestamp: 0,
+        };
+        let out = g.inspect(&call);
+        assert!(matches!(out.decision, Decision::Allow));
     }
 }

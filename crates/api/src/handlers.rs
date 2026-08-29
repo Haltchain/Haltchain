@@ -32,10 +32,10 @@ use crate::siem::{emit_cef, fire_webhook_if_critical, format_cef_line};
 use haltchain_merkle::{DistributedMerkleVerifier, RootAttestation};
 use haltchain_tendermint::{QueryRequest, TendermintBridge, TendermintBridgeConfig};
 use haltchain_validator::{
-    AgentVersion, AppState, ApproveRecommendationRequest, CreateVariantReq,
-    McpInspectDecision, McpInspectToolCall,
-    RejectRecommendationRequest, ReportIntentRequest, RevertRecommendationRequest, ThresholdPatch,
-    ValidationRequest, VersionLineageEntry, review::OutcomeRequest,
+    AgentVersion, AppState, ApproveRecommendationRequest, CreateVariantReq, McpInspectDecision,
+    McpInspectToolCall, RejectRecommendationRequest, ReportIntentRequest,
+    RevertRecommendationRequest, ThresholdPatch, ValidationRequest, VersionLineageEntry,
+    review::OutcomeRequest,
 };
 
 #[derive(Debug, Deserialize)]
@@ -373,7 +373,7 @@ pub async fn health_ready(State(state): State<Arc<AppState>>) -> impl IntoRespon
             // also check extension health when postgres is available
             let ext_status = state.extension_health().await;
             let all_ok = ext_status.values().all(|v| *v);
-            let status_code = if all_ok { StatusCode::OK } else { StatusCode::OK }; // degraded still 200 for k8s
+            let status_code = StatusCode::OK; // degraded still 200 for k8s
             (
                 status_code,
                 Json(json!({
@@ -410,11 +410,20 @@ pub async fn health_started(State(state): State<Arc<AppState>>) -> impl IntoResp
             Json(json!({ "status": "started", "embedding": "ok" })),
         )
             .into_response(),
-        Err(e) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "status": "not_started", "error": e })),
-        )
-            .into_response(),
+        Err(e) => {
+            // HC010: emit SIEM event on embedding unavailability so operations can alert
+            use crate::siem::emit_embedding_downgrade;
+            let hash_dims = std::env::var("HALTCHAIN_HASH_DIMS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(384);
+            emit_embedding_downgrade(&e, hash_dims);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "status": "not_started", "error": e })),
+            )
+                .into_response()
+        }
     }
 }
 
@@ -1287,7 +1296,10 @@ async fn admin_login(
         use crate::auth::rate_limiter;
         let limiter = rate_limiter();
         // Use a dedicated key namespace for login attempts (stricter: 10 attempts/window).
-        if let Err(_) = limiter.check(&format!("login:{client_ip}"), None, None) {
+        if limiter
+            .check(&format!("login:{client_ip}"), None, None)
+            .is_err()
+        {
             return (
                 StatusCode::TOO_MANY_REQUESTS,
                 Json(json!({ "error": "too many login attempts, try again later" })),
@@ -1591,9 +1603,39 @@ async fn audit_fts_search(
         return err.into_response();
     }
     if body.q.trim().is_empty() {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": "q is required"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "q is required"})),
+        )
+            .into_response();
     }
     let limit = body.limit.unwrap_or(50).clamp(1, 200);
+
+    // parse x-haltchain-org; required for tenant scoping
+    let org_id = match headers
+        .get("x-haltchain-org")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(raw) => match Uuid::parse_str(raw) {
+            Ok(id) => id,
+            Err(_) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({"error": "x-haltchain-org must be a valid UUID"})),
+                )
+                    .into_response();
+            }
+        },
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"error": "x-haltchain-org header is required for FTS"})),
+            )
+                .into_response();
+        }
+    };
 
     let db_backend = match state.db.as_ref() {
         Some(db) => db,
@@ -1607,7 +1649,10 @@ async fn audit_fts_search(
     };
 
     match db_backend.as_postgres() {
-        Some(pg) => match pg.search_audit_decisions(&body.q, limit).await {
+        Some(pg) => match pg
+            .search_audit_decisions_scoped(org_id, &body.q, limit)
+            .await
+        {
             Ok(results) => {
                 let rows: Vec<_> = results
                     .iter()
@@ -1682,8 +1727,31 @@ async fn admin_policy_db_reload(
                 .await
             {
                 Ok(()) => {
-                    info!(policy_name = %body.policy_name, "DB policy config reloaded with advisory lock");
-                    Json(json!({"status": "ok", "policy_name": body.policy_name})).into_response()
+                    // Read it back so policy_configs is not write-only; validate it parses
+                    let readback = pg.get_policy_config(body.org_id, &body.policy_name).await;
+                    let (version, readable) = match readback {
+                        Ok(Some(ref cfg)) => {
+                            use haltchain_policy::JsonbPolicy;
+                            let _parsed = JsonbPolicy::from_jsonb(&cfg.rules);
+                            info!(
+                                policy_name = %body.policy_name,
+                                version = cfg.version,
+                                "DB policy config reloaded and verified readable"
+                            );
+                            (cfg.version, true)
+                        }
+                        _ => {
+                            warn!(policy_name = %body.policy_name, "policy reload wrote but read-back failed");
+                            (0, false)
+                        }
+                    };
+                    Json(json!({
+                        "status": "ok",
+                        "policy_name": body.policy_name,
+                        "version": version,
+                        "readable": readable
+                    }))
+                    .into_response()
                 }
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,

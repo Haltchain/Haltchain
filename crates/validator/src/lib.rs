@@ -29,10 +29,10 @@ use haltchain_embeddings::{
     ConversationStore, DriftAction, DriftScorer, EmbedPipeline, GoalStore, ModelKind,
     action_to_text,
 };
-use haltchain_merkle::MerkleAccumulator;
+use haltchain_mcp_guard::LiteMcpGuard;
 use haltchain_mcp_guard::McpGuard;
 use haltchain_mcp_guard::types::{Decision as McpDecision, McpToolCall};
-use haltchain_mcp_guard::LiteMcpGuard;
+use haltchain_merkle::MerkleAccumulator;
 use haltchain_policy::{
     ActionContext, AggregateBreaker, CIRCUIT_BREAK_SECS, MAX_ACTIONS_PER_MINUTE, PolicyResult,
 };
@@ -66,10 +66,10 @@ use review::{ReviewEntry, ReviewQueue};
 use thresholds::{PolicyVariant, ThresholdStore};
 
 fn cognitive_layer_enabled() -> bool {
-    match std::env::var("HALTCHAIN_COGNITIVE_DISABLED").as_deref() {
-        Ok("1") | Ok("true") | Ok("yes") | Ok("TRUE") => false,
-        _ => true,
-    }
+    !matches!(
+        std::env::var("HALTCHAIN_COGNITIVE_DISABLED").as_deref(),
+        Ok("1") | Ok("true") | Ok("yes") | Ok("TRUE")
+    )
 }
 
 fn request_org_id(metadata: &serde_json::Value) -> Option<Uuid> {
@@ -144,18 +144,75 @@ fn goal_intent_signal(goal: &str, intent_score: f64, research_score: f64) -> f64
 }
 
 // Re-export public types for callers (maintains backward compatibility).
+pub use haltchain_mcp_guard::types::{
+    Decision as McpInspectDecision, McpToolCall as McpInspectToolCall,
+};
+pub use haltchain_mcp_guard::{LiteInspectResult, McpInspectProof};
 pub use improvement::{
     AdversarialSuiteResult, AgentVersion, ImprovementDecision, SandboxResult, VersionDiff,
     VersionDiffSummary, VersionLineageEntry,
 };
-pub use haltchain_mcp_guard::types::{Decision as McpInspectDecision, McpToolCall as McpInspectToolCall};
-pub use haltchain_mcp_guard::{LiteInspectResult, McpInspectProof};
 pub use types::{
     ActionPayload, AdjustmentRecommendation, AgentStatus, ApproveRecommendationRequest,
     CreateVariantReq, DataSource, Decision, DriftStatus, IntentRecord, LearningRunReport,
     RejectRecommendationRequest, ReportIntentRequest, RevertRecommendationRequest, RiskAdvisory,
     ScanTier, ThresholdPatch, ValidationRequest, ValidationResponse,
 };
+
+/// Whether `HALTCHAIN_QUORUM_FAIL_OPEN` is honoured in this environment.
+///
+/// The flag lets a high-stakes action through without cluster agreement, so in
+/// production it is ignored unless the operator also sets
+/// `HALTCHAIN_QUORUM_FAIL_OPEN_ACK_UNSAFE=1`. Outside production it works as before.
+pub fn quorum_fail_open_allowed() -> bool {
+    let truthy = |name: &str| {
+        std::env::var(name)
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
+            .unwrap_or(false)
+    };
+    if !truthy("HALTCHAIN_QUORUM_FAIL_OPEN") {
+        return false;
+    }
+    let is_production = std::env::var("HALTCHAIN_ENV")
+        .map(|v| v.eq_ignore_ascii_case("production"))
+        .unwrap_or(false);
+    if is_production && !truthy("HALTCHAIN_QUORUM_FAIL_OPEN_ACK_UNSAFE") {
+        tracing::error!(
+            "HALTCHAIN_QUORUM_FAIL_OPEN ignored in production: set \
+             HALTCHAIN_QUORUM_FAIL_OPEN_ACK_UNSAFE=1 to accept quorum bypass. Failing closed."
+        );
+        return false;
+    }
+    true
+}
+
+/// HC011 — quorum bypass. Emitted every time a high-stakes action is allowed
+/// without cluster agreement so SIEM can alert instead of only a log line.
+fn emit_quorum_bypass_cef(transaction_id: &str, agent_id: &str, amount_cents: u64) {
+    let escape = |s: &str| {
+        s.replace('\\', "\\\\")
+            .replace('=', "\\=")
+            .replace('\n', "\\n")
+    };
+    let line = format!(
+        "CEF:0|HaltChain|Validator|{}|HC011|Quorum Bypass|9|rt={rt} act=allow_without_quorum \
+         suid={agent} cs1={txn} cs1Label=transactionId cn1={amount} cn1Label=amountCents",
+        env!("CARGO_PKG_VERSION"),
+        rt = escape(&Utc::now().to_rfc3339()),
+        agent = escape(agent_id),
+        txn = escape(transaction_id),
+        amount = amount_cents,
+    );
+    tracing::warn!(cef_line = %line, cef_sig = "HC011", "SIEM CEF");
+    tracing::warn!(
+        txn = %transaction_id,
+        agent_id = %agent_id,
+        amount_cents,
+        cef_sig = "HC011",
+        "QUORUM_BYPASS: high-stakes action allowed without cluster agreement \
+         (HALTCHAIN_QUORUM_FAIL_OPEN)"
+    );
+}
 
 /// Deployment profile controlling resource expectations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,16 +276,16 @@ impl AppState {
     /// Async constructor: Postgres from `DATABASE_URL` when set; on failure (or unset) falls back to SQLite (`db.sqlite` or `HALTCHAIN_SQLITE_FALLBACK_PATH`).
     pub async fn new_async() -> Arc<Self> {
         let mut db: Option<Arc<DbBackend>> = None;
-        if let Ok(url) = std::env::var("DATABASE_URL") {
-            if !url.trim().is_empty() {
-                match DbStore::connect(&url).await {
-                    Ok(store) => {
-                        tracing::info!("connected to postgres");
-                        db = Some(Arc::new(DbBackend::Postgres(store)));
-                    }
-                    Err(e) => {
-                        tracing::warn!("DATABASE_URL present but postgres unreachable: {e}");
-                    }
+        if let Ok(url) = std::env::var("DATABASE_URL")
+            && !url.trim().is_empty()
+        {
+            match DbStore::connect(&url).await {
+                Ok(store) => {
+                    tracing::info!("connected to postgres");
+                    db = Some(Arc::new(DbBackend::Postgres(store)));
+                }
+                Err(e) => {
+                    tracing::warn!("DATABASE_URL present but postgres unreachable: {e}");
                 }
             }
         }
@@ -615,10 +672,22 @@ impl AppState {
     }
 
     pub async fn extension_health(&self) -> std::collections::HashMap<String, bool> {
-        if let Some(db) = &self.db {
-            if let Some(pg) = db.as_postgres() {
-                return pg.extension_health().await;
+        if let Some(db) = &self.db
+            && let Some(pg) = db.as_postgres()
+        {
+            let status = pg.extension_health().await;
+            for (ext, ok) in &status {
+                if !ok {
+                    pg.record_circuit_event(
+                        ext,
+                        "failure",
+                        Some("extension unavailable at health check"),
+                        None,
+                    )
+                    .await;
+                }
             }
+            return status;
         }
         std::collections::HashMap::new()
     }
@@ -637,13 +706,13 @@ impl AppState {
 
     /// Drain the capability WAL and persist to Postgres (no-op if db is None or SQLite).
     pub async fn flush_capability_wal(&self) {
-        if let Some(db) = &self.db {
-            if let Some(pg_db) = db.as_postgres() {
-                match self.capability.store().flush_to_db(pg_db).await {
-                    Ok(0) => {}
-                    Ok(n) => tracing::debug!(flushed = n, "capability WAL flushed"),
-                    Err(e) => tracing::warn!("capability WAL flush failed: {e}"),
-                }
+        if let Some(db) = &self.db
+            && let Some(pg_db) = db.as_postgres()
+        {
+            match self.capability.store().flush_to_db(pg_db).await {
+                Ok(0) => {}
+                Ok(n) => tracing::debug!(flushed = n, "capability WAL flushed"),
+                Err(e) => tracing::warn!("capability WAL flush failed: {e}"),
             }
         }
     }
@@ -880,6 +949,7 @@ impl AppState {
                     .map(|d| (1.0_f64 - d.semantic_drift).clamp(0.0, 1.0)),
                 label: Some(resp.decision.as_str().to_ascii_lowercase()),
             });
+            let agent_id_for_drift = req.agent_id.clone();
             tokio::spawn(async move {
                 let res = if let Some(ref d) = drift_opt {
                     db.insert_decision_with_drift(&record, d).await
@@ -895,10 +965,24 @@ impl AppState {
                     if let Err(e) = pg_db.insert_telemetry_hot(&telemetry).await {
                         tracing::warn!("telemetry_hot persist failed: {e}");
                     }
-                    if let Some(embedding_record) = embedding_record.as_ref() {
-                        if let Err(e) = pg_db.insert_action_embedding(embedding_record).await {
-                            tracing::warn!("action_embedding persist failed: {e}");
-                        }
+                    if let Some(embedding_record) = embedding_record.as_ref()
+                        && let Err(e) = pg_db.insert_action_embedding(embedding_record).await
+                    {
+                        tracing::warn!("action_embedding persist failed: {e}");
+                    }
+                    // persist drift snapshot so drift_counters_hot is not write-only
+                    if let Some(ref d) = drift_opt
+                        && let Err(e) = pg_db
+                            .upsert_drift_counter(
+                                &agent_id_for_drift,
+                                decision_org_id,
+                                "semantic_drift",
+                                d.semantic_drift,
+                                60,
+                            )
+                            .await
+                    {
+                        tracing::warn!("drift_counter upsert failed: {e}");
                     }
                 }
             });
@@ -1797,16 +1881,9 @@ impl AppState {
                 QuorumTracker::with_cluster(&transaction_id, self.cluster_size, effective_quorum);
             tracker.approve(self.node_id);
             if !matches!(tracker.decision(), QuorumDecision::Approved) {
-                let fail_open = std::env::var("HALTCHAIN_QUORUM_FAIL_OPEN")
-                    .map(|v| {
-                        v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
-                    })
-                    .unwrap_or(false);
+                let fail_open = quorum_fail_open_allowed();
                 if fail_open {
-                    tracing::warn!(
-                        txn = %transaction_id,
-                        "HALTCHAIN_QUORUM_FAIL_OPEN: allowing without quorum (alert only)"
-                    );
+                    emit_quorum_bypass_cef(&transaction_id, &req.agent_id, amount_cents);
                 } else {
                     let actions = agent.current_action_count();
                     return ValidationResponse {
@@ -1986,7 +2063,9 @@ impl AppState {
     ) -> IntentRecord {
         let (research_score, intent_score) = analyze_context(goal);
         let intent_confidence = goal_intent_signal(goal, intent_score, research_score);
-        let intent_label = classify_intent(intent_confidence, &[], goal).as_str().to_string();
+        let intent_label = classify_intent(intent_confidence, &[], goal)
+            .as_str()
+            .to_string();
 
         let rec = IntentRecord {
             agent_id: agent_id.to_string(),

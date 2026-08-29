@@ -14,9 +14,10 @@ use serde::{Deserialize, Serialize};
 ///
 /// This unified version provides a common vocabulary for all detection modules
 /// with clear percentile-based thresholds per Project Architecture §1.1.3.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum AlertTier {
     /// No anomaly detected (0-80th percentile)
+    #[default]
     None,
     /// Low confidence anomaly (80-95th percentile)
     Low,
@@ -69,12 +70,6 @@ impl AlertTier {
             self,
             AlertTier::Medium | AlertTier::High | AlertTier::Critical
         )
-    }
-}
-
-impl Default for AlertTier {
-    fn default() -> Self {
-        AlertTier::None
     }
 }
 

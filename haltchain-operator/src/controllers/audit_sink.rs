@@ -8,7 +8,7 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::{
-    Resource, ResourceExt,
+    ResourceExt,
     api::{Api, ObjectMeta, Patch, PatchParams},
     client::Client,
     runtime::{
@@ -19,7 +19,21 @@ use kube::{
 use serde_json::json;
 use tracing::{error, info, warn};
 
-use crate::crd::audit_sink::{AuditSink, AuditSinkStatus};
+use crate::crd::audit_sink::{AuditSink, AuditSinkSpec, AuditSinkStatus};
+
+/// Validate an AuditSink spec. Returns an error message if invalid.
+pub fn validate_sink(spec: &AuditSinkSpec) -> Option<String> {
+    match spec.sink_type.as_str() {
+        "webhook" if spec.webhook.is_none() => {
+            Some("webhook config required for sink_type=webhook".to_string())
+        }
+        "kafka" if spec.kafka.is_none() => {
+            Some("kafka config required for sink_type=kafka".to_string())
+        }
+        "webhook" | "kafka" | "stdout" => None,
+        other => Some(format!("unknown sink_type: {}", other)),
+    }
+}
 
 struct Ctx {
     client: Client,
@@ -50,46 +64,10 @@ async fn reconcile(sink: Arc<AuditSink>, ctx: Arc<Ctx>) -> Result<Action, kube::
     info!(namespace = %ns, name = %name, "Reconciling AuditSink");
 
     // Validate sink type
-    match sink.spec.sink_type.as_str() {
-        "webhook" if sink.spec.webhook.is_none() => {
-            warn!(
-                "AuditSink {} has sink_type=webhook but no webhook config",
-                name
-            );
-            patch_status(
-                &ctx.client,
-                &ns,
-                &name,
-                "Failed",
-                "webhook config required for sink_type=webhook",
-            )
-            .await?;
-            return Ok(Action::requeue(Duration::from_secs(60)));
-        }
-        "kafka" if sink.spec.kafka.is_none() => {
-            warn!("AuditSink {} has sink_type=kafka but no kafka config", name);
-            patch_status(
-                &ctx.client,
-                &ns,
-                &name,
-                "Failed",
-                "kafka config required for sink_type=kafka",
-            )
-            .await?;
-            return Ok(Action::requeue(Duration::from_secs(60)));
-        }
-        "webhook" | "kafka" | "stdout" => {}
-        other => {
-            patch_status(
-                &ctx.client,
-                &ns,
-                &name,
-                "Failed",
-                &format!("unknown sink_type: {}", other),
-            )
-            .await?;
-            return Ok(Action::requeue(Duration::from_secs(60)));
-        }
+    if let Some(err) = validate_sink(&sink.spec) {
+        warn!("AuditSink {} validation failed: {}", name, err);
+        patch_status(&ctx.client, &ns, &name, "Failed", &err).await?;
+        return Ok(Action::requeue(Duration::from_secs(60)));
     }
 
     // Write resolved configuration to a ConfigMap.

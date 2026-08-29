@@ -5,12 +5,29 @@
 # Rust/Cargo
 /Cargo.lock
 
-# Temporary files
+# Temporary / log files
 *.log
 *.tmp
 *.temp
 *.swp
 *~
+pgbench_log*
+pgbench_log.*
+
+# Benchmark gate artifacts (regenerate locally; do not commit)
+PH1B/logs/
+BENCHMARK_RESULTS.json
+BENCHMARK_RESULTS*.json
+
+# Garak manual run output
+security/garak/reports/
+!security/garak/reports/.gitkeep
+
+# Local DB smoke files
+/haltchain.db
+/db.sqlite
+/haltchain-smoke.db
+*.report.jsonl
 
 # macOS
 .DS_Store
@@ -59,7 +76,7 @@ config/secrets*
 /tmp/
 .copilot/
 
-# Markdown files - ignore all except README.md
+# Markdown files - ignore all except README.md and demo docs
 *.md
 !README.md
 **/examples/
@@ -91,8 +108,10 @@ frontend/.env*
 
 /*.sh
 *.sh
+!deploy/**/*.sh
 
 sdk/typescript/node_modules/
 scripts/
 
 Documents/*
+

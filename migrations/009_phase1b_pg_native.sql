@@ -16,7 +16,16 @@
 -- ── Extensions ────────────────────────────────────────────────────────────────
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
-CREATE EXTENSION IF NOT EXISTS pg_cron;  -- may require superuser on first run
+
+-- pg_cron is optional. It needs shared_preload_libraries and is absent on the
+-- stock pgvector image and on most managed Postgres. Without it the telemetry
+-- promotion falls back to the app-side TelemetryHotWriter, so don't abort here.
+DO $$
+BEGIN
+    EXECUTE 'CREATE EXTENSION IF NOT EXISTS pg_cron';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'pg_cron unavailable (%); telemetry promotion will use the app-side writer', SQLERRM;
+END $$;
 
 -- ── Roles ─────────────────────────────────────────────────────────────────────
 
@@ -33,7 +42,8 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ── JSONB Policy Configs ───────────────────────────────────────────────────────
--- Source of truth for dynamic policy rules evaluated via jsonb_path_query().
+-- Admin store for dynamic policy rules. Rules are fetched whole by the app and
+-- evaluated in Rust (haltchain_policy::JsonbPolicy), NOT via jsonb_path_query().
 -- Hot-reload is race-free via pg_advisory_xact_lock() in the app layer.
 
 CREATE TABLE IF NOT EXISTS policy_configs (
@@ -53,7 +63,8 @@ CREATE INDEX IF NOT EXISTS idx_policy_configs_org_enabled
     ON policy_configs (org_id, enabled)
     WHERE enabled = true;
 
--- GIN index for fast jsonb_path_query() extraction
+-- GIN index on rules for ad-hoc admin/auditor containment queries.
+-- The request hot path does not query into the JSONB; it loads the whole row.
 CREATE INDEX IF NOT EXISTS idx_policy_configs_rules_gin
     ON policy_configs USING GIN (rules);
 
@@ -98,18 +109,25 @@ CREATE INDEX IF NOT EXISTS idx_telemetry_durable_metric_ts
 
 -- ── pg_cron: Promote unlogged telemetry → WAL every 5 seconds ─────────────────
 
-SELECT cron.schedule(
-    'telemetry-promote',
-    '5 seconds',
-    $$
-    INSERT INTO telemetry_durable (id, org_id, agent_id, metric, value, tags, ts)
-    SELECT id, org_id, agent_id, metric, value, tags, ts FROM telemetry_hot
-    ON CONFLICT (id) DO NOTHING;
-    DELETE FROM telemetry_hot WHERE id IN (
-        SELECT id FROM telemetry_durable
-    );
-    $$
-);
+DO $outer$
+BEGIN
+    IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+        PERFORM cron.schedule(
+            'telemetry-promote',
+            '5 seconds',
+            $job$
+            INSERT INTO telemetry_durable (id, org_id, agent_id, metric, value, tags, ts)
+            SELECT id, org_id, agent_id, metric, value, tags, ts FROM telemetry_hot
+            ON CONFLICT (id) DO NOTHING;
+            DELETE FROM telemetry_hot WHERE id IN (
+                SELECT id FROM telemetry_durable
+            );
+            $job$
+        );
+    ELSE
+        RAISE NOTICE 'pg_cron absent; skipping telemetry-promote schedule';
+    END IF;
+END $outer$;
 
 -- ── Full-Text Search on Audit Decisions ───────────────────────────────────────
 -- Inverted index for post-hoc audit search without Elasticsearch.
@@ -222,9 +240,14 @@ GRANT USAGE ON SCHEMA public TO web_anon;
 GRANT auditor_role TO web_anon;  -- PostgREST switches role after JWT validation
 
 -- ── JWT Auth Helper (pgcrypto) ────────────────────────────────────────────────
--- Application layer generates JWT; PostgreSQL validates via pgcrypto.
--- This function extracts org_id from a HS256 JWT and sets app.current_org_id.
+-- Extracts org_id from a HS256 JWT and sets app.current_org_id.
 -- Call at connection start: SELECT set_tenant_from_jwt($1, $2);
+--
+-- SCOPE: this is for direct-SQL consumers that never pass through the Rust API —
+-- PostgREST/PG GraphQL auditor sessions and manual psql investigation.
+-- The haltchain-api request path does NOT call this; it binds tenant context in
+-- Rust via set_config('app.current_org_id', ...) after validating the JWT there.
+-- Both paths converge on the same app.current_org_id setting that RLS reads.
 
 CREATE OR REPLACE FUNCTION set_tenant_from_jwt(
     token TEXT,

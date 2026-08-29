@@ -2,7 +2,7 @@
 #![no_main]
 
 use aya_ebpf::macros::{kprobe, map};
-use aya_ebpf::maps::RingBuf;
+use aya_ebpf::maps::{HashMap, RingBuf};
 use aya_ebpf::programs::ProbeContext;
 
 #[repr(C)]
@@ -17,6 +17,12 @@ pub struct SyscallEvent {
 #[map(name = "events")]
 static mut EVENTS: RingBuf = RingBuf::with_byte_size(256 * 1024, 0);
 
+// Userspace writes comm names that must be BLOCKED into this map (key = comm[16], value = 1u8).
+// Entries are populated by the userspace probe_manager via aya Map::insert().
+// Default: empty map → all comms are allowed (observability mode).
+#[map(name = "blocked_comms")]
+static mut BLOCKED_COMMS: HashMap<[u8; 16], u8> = HashMap::with_max_entries(256, 0);
+
 const ALLOW: [u8; 16] = *b"ALLOW\0\0\0\0\0\0\0\0\0\0\0";
 const DENY: [u8; 16] = *b"DENY\0\0\0\0\0\0\0\0\0\0\0\0";
 
@@ -25,9 +31,12 @@ fn copy_into(dst: &mut [u8], src: &[u8]) {
     dst[..len].copy_from_slice(&src[..len]);
 }
 
-// observability-only stub until map-driven policy is wired from userspace
-fn check_policy(_pid: u32, _comm: &[u8; 16]) -> bool {
-    true
+// Look up comm in the BLOCKED_COMMS policy map. Returns true (allow) when the comm is
+// NOT in the map. Returns false (deny) when a userspace policy entry exists for it.
+// When the map is empty (no policy loaded), all comms are allowed — observability mode.
+fn check_policy(_pid: u32, comm: &[u8; 16]) -> bool {
+    let blocked = unsafe { BLOCKED_COMMS.get(comm) };
+    blocked.is_none()
 }
 
 fn emit_event(syscall_name: &[u8], pid: u32, comm: [u8; 16], decision: [u8; 16]) {

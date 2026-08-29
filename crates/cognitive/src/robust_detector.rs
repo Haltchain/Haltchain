@@ -257,6 +257,12 @@ pub enum ContextType {
 
 pub struct ContextClassifier;
 
+impl Default for ContextClassifier {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ContextClassifier {
     pub fn new() -> Self {
         Self

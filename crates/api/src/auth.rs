@@ -654,15 +654,13 @@ pub fn require_api_key_with_scope(
     {
         match verify_jwt_token(token) {
             Ok(claims) => {
-                if let Some(scope) = required_scope {
-                    if !claims.has_scope(scope) {
-                        return Err((
-                            StatusCode::FORBIDDEN,
-                            Json(
-                                json!({ "error": format!("token missing required scope: {scope}") }),
-                            ),
-                        ));
-                    }
+                if let Some(scope) = required_scope
+                    && !claims.has_scope(scope)
+                {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(json!({ "error": format!("token missing required scope: {scope}") })),
+                    ));
                 }
                 return Ok(());
             }
@@ -1075,6 +1073,7 @@ fn configured_jwt_secret() -> &'static Option<String> {
 
 /// Issue a short-lived JWT for the given agent_id (unrestricted scopes).
 /// Returns `Err` if `HALTCHAIN_JWT_SECRET` is not configured.
+#[allow(dead_code)]
 pub fn issue_jwt_token(agent_id: &str) -> Result<String, String> {
     issue_scoped_jwt_token(agent_id, &[])
 }

@@ -1,15 +1,15 @@
 //! PolicySet controller — reconciles PolicySet CRs and hot-reloads rule packs
 //! into all HaltChain sidecars managed by a matching AgentProfile.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
-use std::collections::HashMap;
 
 use anyhow::Result;
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::{ConfigMap, Pod};
 use kube::{
-    Resource, ResourceExt,
+    ResourceExt,
     api::{Api, ListParams, Patch, PatchParams},
     client::Client,
     runtime::{
@@ -21,7 +21,9 @@ use serde_json::json;
 use tracing::{error, info, warn};
 
 use crate::crd::policy_set::{PolicySet, PolicySetStatus};
-use crate::reload::{pod_matches_policy_set, policy_sync_url, sidecar_port_from_pod, webhook_signature};
+use crate::reload::{
+    pod_matches_policy_set, policy_sync_url, sidecar_port_from_pod, webhook_signature,
+};
 
 pub struct Ctx {
     pub client: Client,
@@ -47,10 +49,7 @@ pub async fn run(client: Client) -> Result<()> {
 
 /// Resolves rule content from inline rules or ConfigMap reference.
 /// Inline `rules` takes precedence over `configMapRef`.
-pub async fn resolve_rules(
-    client: &Client,
-    policy_set: &PolicySet,
-) -> Result<String, kube::Error> {
+pub async fn resolve_rules(client: &Client, policy_set: &PolicySet) -> Result<String, kube::Error> {
     let ns = policy_set
         .namespace()
         .unwrap_or_else(|| "default".to_string());
@@ -152,7 +151,7 @@ async fn reconcile(policy_set: Arc<PolicySet>, ctx: Arc<Ctx>) -> Result<Action, 
         Ok(rules) => rules,
         Err(e) => {
             let cmr = policy_set.spec.config_map_ref.as_ref();
-            let cm_name = cmr.map(|c| c.name.clone()).unwrap_or_default();
+            let _cm_name = cmr.map(|c| c.name.clone()).unwrap_or_default();
             patch_status(
                 &ctx.client,
                 &ns,

@@ -112,6 +112,7 @@ const PARAPHRASE_PAIRS: &[(&str, &str, ReasoningPattern)] = &[
 /// A rogue AGI won't use obvious keywords. It will use sophisticated
 /// paraphrasing to evade detection. This test finds if our semantic
 /// embeddings actually work or if they're just keyword matching.
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn paraphrased_attacks_must_be_detected() {
     let monitor = CognitiveMonitor::new();
@@ -125,7 +126,7 @@ fn paraphrased_attacks_must_be_detected() {
         let paraphrased_caught = is_flagged(&paraphrased_result);
 
         results.push((
-            expected_pattern.clone(),
+            *expected_pattern,
             direct_caught,
             paraphrased_caught,
             get_confidence(&direct_result),
@@ -193,6 +194,7 @@ fn paraphrased_attacks_must_be_detected() {
 
 /// Test if the system catches gradual semantic drift.
 /// A sophisticated attacker might make small semantic changes to evade.
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn gradual_semantic_drift_detection() {
     let monitor = CognitiveMonitor::new();
@@ -257,6 +259,7 @@ fn gradual_semantic_drift_detection() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Test if malicious content hidden in benign context is caught.
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn context_camouflage_detection() {
     let monitor = CognitiveMonitor::new();
@@ -314,6 +317,7 @@ fn context_camouflage_detection() {
 
 /// Test if small character perturbations break detection.
 /// This simulates typos, unicode tricks, etc.
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn adversarial_perturbation_robustness() {
     let monitor = CognitiveMonitor::new();
@@ -369,6 +373,7 @@ fn adversarial_perturbation_robustness() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Test that legitimate security research doesn't trigger false positives.
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn false_positive_stress_test() {
     let monitor = CognitiveMonitor::new();
@@ -419,6 +424,7 @@ fn false_positive_stress_test() {
 // TEST 7: THRESHOLD DISCOVERY (FIND THE BREAKING POINT)
 
 /// Find the exact confidence threshold where detection fails.
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn threshold_breaking_point_discovery() {
     let monitor = CognitiveMonitor::new();

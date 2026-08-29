@@ -2,6 +2,9 @@
 name = "haltchain-consensus"
 version = "0.1.0"
 edition = "2024"
+description = "Raft consensus node with optional disk persistence"
+license = "MIT"
+repository = "https://github.com/Haltchain/HaltChain"
 
 [dependencies]
 tokio       = { workspace = true }

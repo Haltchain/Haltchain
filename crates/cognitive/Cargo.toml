@@ -2,6 +2,9 @@
 name = "haltchain-cognitive"
 version = "0.1.0"
 edition = "2024"
+description = "Cognitive screening, ONNX detection, and semantic monitoring"
+license = "MIT"
+repository = "https://github.com/Haltchain/HaltChain"
 
 [dependencies]
 haltchain-embeddings = { path = "../embeddings" }

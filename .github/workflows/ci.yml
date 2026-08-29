@@ -71,6 +71,45 @@ jobs:
       - name: Run integration tests
         run: cargo test -p haltchain-rules --test integration
 
+  db-integration:
+    name: DB Integration (live Postgres)
+    runs-on: ubuntu-latest
+    needs: test
+    timeout-minutes: 20
+    env:
+      DATABASE_URL: postgres://haltchain:haltchain@localhost:5432/haltchain_test
+      # Unreachable Postgres must fail this job instead of silently skipping.
+      HALTCHAIN_REQUIRE_DB_TESTS: "1"
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: haltchain_test
+          POSTGRES_USER: haltchain
+          POSTGRES_PASSWORD: haltchain
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # pg_cron is absent from this image; migrations 009/010 degrade gracefully.
+      - name: Apply schema migrations
+        env:
+          PGPASSWORD: haltchain
+        run: |
+          for f in migrations/0*.sql; do
+            echo "applying $f"
+            psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
+          done
+      - name: Run DB integration tests
+        run: cargo test -p haltchain-db --test integration
+
   sdk-contract:
     name: SDK/API Contract Gate
     runs-on: ubuntu-latest
@@ -116,7 +155,8 @@ jobs:
             migrations/013_mcp_guard_schema.sql \
             migrations/014_mcp_policy_engine.sql \
             migrations/015_concurrency_hardening_and_phase2_prep.sql \
-            migrations/016_backfill_null_org_rows.sql; do
+            migrations/016_backfill_null_org_rows.sql \
+            migrations/017_rls_hot_tables.sql; do
             psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
           done
       - name: Build API
@@ -196,7 +236,8 @@ jobs:
             migrations/013_mcp_guard_schema.sql \
             migrations/014_mcp_policy_engine.sql \
             migrations/015_concurrency_hardening_and_phase2_prep.sql \
-            migrations/016_backfill_null_org_rows.sql; do
+            migrations/016_backfill_null_org_rows.sql \
+            migrations/017_rls_hot_tables.sql; do
             psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
           done
       - name: Build API
@@ -304,7 +345,8 @@ jobs:
             migrations/013_mcp_guard_schema.sql \
             migrations/014_mcp_policy_engine.sql \
             migrations/015_concurrency_hardening_and_phase2_prep.sql \
-            migrations/016_backfill_null_org_rows.sql; do
+            migrations/016_backfill_null_org_rows.sql \
+            migrations/017_rls_hot_tables.sql; do
             psql -h localhost -U haltchain -d haltchain_test -v ON_ERROR_STOP=1 -f "$f"
           done
 
@@ -338,14 +380,30 @@ jobs:
               ;;
           esac
 
-  ebpf-deps:
-    name: eBPF BPF crate dependency gate
+  ebpf-build:
+    name: eBPF BPF programs build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Verify aya-ebpf dependency resolves
-        run: cargo fetch --manifest-path crates/ebpf-bpf/Cargo.toml
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: bpfel-unknown-none
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ebpf-bpf
+
+      - name: Build eBPF programs
+        run: |
+          cargo +nightly build -Z build-std=core -p haltchain-ebpf-bpf --target bpfel-unknown-none --release
+          mkdir -p artifacts/ebpf
+          cp target/bpfel-unknown-none/release/haltchain artifacts/ebpf/haltchain.o
+
+      - name: Upload eBPF object artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: haltchain-ebpf-object
+          path: artifacts/ebpf/haltchain.o
+          if-no-files-found: error
 
   #Security audit 
   audit:

@@ -134,8 +134,8 @@ pub fn analyze_context(text: &str) -> (f64, f64) {
 
     // Normalize by text length
     let word_count = words.len().max(1) as f64;
-    research_score = research_score / word_count.sqrt();
-    intent_score = intent_score / word_count.sqrt();
+    research_score /= word_count.sqrt();
+    intent_score /= word_count.sqrt();
 
     (research_score, intent_score)
 }

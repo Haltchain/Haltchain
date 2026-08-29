@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::{extract::State, http::HeaderMap, routing::post, Router};
+use axum::{Router, extract::State, http::HeaderMap, routing::post};
 use k8s_openapi::api::core::v1::{Pod, PodStatus};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use tokio::sync::Mutex;

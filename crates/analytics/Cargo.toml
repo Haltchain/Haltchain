@@ -2,6 +2,9 @@
 name = "haltchain-analytics"
 version = "0.1.0"
 edition = "2024"
+description = "Statistical anomaly detection and telemetry for HaltChain"
+license = "MIT"
+repository = "https://github.com/Haltchain/HaltChain"
 
 [dependencies]
 serde      = { workspace = true }

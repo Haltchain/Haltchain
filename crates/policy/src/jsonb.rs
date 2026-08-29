@@ -119,101 +119,101 @@ impl JsonbPolicy {
     /// Returns the first `Deny` encountered, or `Pass` if all checks pass.
     pub fn evaluate(&self, ctx: &ActionContext) -> PolicyResult {
         // Financial
-        if let Some(amount) = ctx.transfer_amount_usd {
-            if amount > self.max_transfer_usd {
-                return PolicyResult::Deny {
-                    reason: format!(
-                        "transfer ${amount:.2} exceeds JSONB policy limit ${:.2}",
-                        self.max_transfer_usd
-                    ),
-                    policy: "MAX_TRANSFER_USD",
-                };
-            }
+        if let Some(amount) = ctx.transfer_amount_usd
+            && amount > self.max_transfer_usd
+        {
+            return PolicyResult::Deny {
+                reason: format!(
+                    "transfer ${amount:.2} exceeds JSONB policy limit ${:.2}",
+                    self.max_transfer_usd
+                ),
+                policy: "MAX_TRANSFER_USD",
+            };
         }
-        if let Some(apm) = ctx.actions_per_minute {
-            if apm > self.max_actions_per_minute {
-                return PolicyResult::Deny {
-                    reason: format!(
-                        "actions/min {apm} exceeds JSONB policy limit {}",
-                        self.max_actions_per_minute
-                    ),
-                    policy: "MAX_ACTIONS_PER_MINUTE",
-                };
-            }
+        if let Some(apm) = ctx.actions_per_minute
+            && apm > self.max_actions_per_minute
+        {
+            return PolicyResult::Deny {
+                reason: format!(
+                    "actions/min {apm} exceeds JSONB policy limit {}",
+                    self.max_actions_per_minute
+                ),
+                policy: "MAX_ACTIONS_PER_MINUTE",
+            };
         }
 
         // Privacy — PII field count
-        if let Some(pii) = ctx.pii_field_count {
-            if pii > self.max_pii_fields {
-                return PolicyResult::Deny {
-                    reason: format!(
-                        "PII fields {pii} exceeds JSONB policy limit {}",
-                        self.max_pii_fields
-                    ),
-                    policy: "MAX_PII_FIELDS",
-                };
-            }
+        if let Some(pii) = ctx.pii_field_count
+            && pii > self.max_pii_fields
+        {
+            return PolicyResult::Deny {
+                reason: format!(
+                    "PII fields {pii} exceeds JSONB policy limit {}",
+                    self.max_pii_fields
+                ),
+                policy: "MAX_PII_FIELDS",
+            };
         }
 
         // Privacy — column minimization ratio
-        if let (Some(req), Some(necessary)) = (ctx.requested_columns, ctx.task_necessary_columns) {
-            if necessary > 0 {
-                let ratio = req as f64 / necessary as f64;
-                if ratio > self.max_requested_columns_ratio {
-                    return PolicyResult::Deny {
-                        reason: format!(
-                            "column ratio {ratio:.2} exceeds JSONB limit {:.2}",
-                            self.max_requested_columns_ratio
-                        ),
-                        policy: "COLUMN_MINIMIZATION",
-                    };
-                }
+        if let (Some(req), Some(necessary)) = (ctx.requested_columns, ctx.task_necessary_columns)
+            && necessary > 0
+        {
+            let ratio = req as f64 / necessary as f64;
+            if ratio > self.max_requested_columns_ratio {
+                return PolicyResult::Deny {
+                    reason: format!(
+                        "column ratio {ratio:.2} exceeds JSONB limit {:.2}",
+                        self.max_requested_columns_ratio
+                    ),
+                    policy: "COLUMN_MINIMIZATION",
+                };
             }
         }
 
         // Compliance — blocked jurisdictions
-        if let Some(dest) = &ctx.destination_jurisdiction {
-            if self.blocked_jurisdictions.contains(&dest.to_uppercase()) {
-                return PolicyResult::Deny {
-                    reason: format!("destination jurisdiction '{dest}' is blocked by JSONB policy"),
-                    policy: "BLOCKED_JURISDICTION",
-                };
-            }
+        if let Some(dest) = &ctx.destination_jurisdiction
+            && self.blocked_jurisdictions.contains(&dest.to_uppercase())
+        {
+            return PolicyResult::Deny {
+                reason: format!("destination jurisdiction '{dest}' is blocked by JSONB policy"),
+                policy: "BLOCKED_JURISDICTION",
+            };
         }
 
         // Operational — CPU / memory
-        if let Some(cpu) = ctx.cpu_percent {
-            if cpu > self.max_cpu_percent {
-                return PolicyResult::Deny {
-                    reason: format!(
-                        "CPU {cpu:.1}% exceeds JSONB policy limit {:.1}%",
-                        self.max_cpu_percent
-                    ),
-                    policy: "CPU_THRESHOLD",
-                };
-            }
+        if let Some(cpu) = ctx.cpu_percent
+            && cpu > self.max_cpu_percent
+        {
+            return PolicyResult::Deny {
+                reason: format!(
+                    "CPU {cpu:.1}% exceeds JSONB policy limit {:.1}%",
+                    self.max_cpu_percent
+                ),
+                policy: "CPU_THRESHOLD",
+            };
         }
-        if let Some(mem) = ctx.memory_percent {
-            if mem > self.max_memory_percent {
-                return PolicyResult::Deny {
-                    reason: format!(
-                        "memory {mem:.1}% exceeds JSONB policy limit {:.1}%",
-                        self.max_memory_percent
-                    ),
-                    policy: "MEMORY_THRESHOLD",
-                };
-            }
+        if let Some(mem) = ctx.memory_percent
+            && mem > self.max_memory_percent
+        {
+            return PolicyResult::Deny {
+                reason: format!(
+                    "memory {mem:.1}% exceeds JSONB policy limit {:.1}%",
+                    self.max_memory_percent
+                ),
+                policy: "MEMORY_THRESHOLD",
+            };
         }
-        if let Some(depth) = ctx.dependency_cascade_depth {
-            if depth > self.max_dependency_cascade_depth {
-                return PolicyResult::Deny {
-                    reason: format!(
-                        "dependency cascade depth {depth} exceeds JSONB policy limit {}",
-                        self.max_dependency_cascade_depth
-                    ),
-                    policy: "MAX_DEPENDENCY_CASCADE_DEPTH",
-                };
-            }
+        if let Some(depth) = ctx.dependency_cascade_depth
+            && depth > self.max_dependency_cascade_depth
+        {
+            return PolicyResult::Deny {
+                reason: format!(
+                    "dependency cascade depth {depth} exceeds JSONB policy limit {}",
+                    self.max_dependency_cascade_depth
+                ),
+                policy: "MAX_DEPENDENCY_CASCADE_DEPTH",
+            };
         }
 
         PolicyResult::Pass

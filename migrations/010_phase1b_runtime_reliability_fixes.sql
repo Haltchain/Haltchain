@@ -7,12 +7,22 @@
 --   2) telemetry-promote pg_cron cadence is forced to true 5-second scheduling
 --      on existing databases (instead of minute-granularity interpretation)
 
--- Ensure pg_cron is present for schedule operations.
-CREATE EXTENSION IF NOT EXISTS pg_cron;
-
--- Recreate telemetry-promote with an explicit 5-second interval.
+-- pg_cron is optional; see 009. Missing extension must not abort the migration.
 DO $$
 BEGIN
+    EXECUTE 'CREATE EXTENSION IF NOT EXISTS pg_cron';
+EXCEPTION WHEN OTHERS THEN
+    RAISE NOTICE 'pg_cron unavailable (%); skipping schedule fixes', SQLERRM;
+END $$;
+
+-- Recreate telemetry-promote with an explicit 5-second interval.
+DO $outer$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+        RAISE NOTICE 'pg_cron absent; skipping telemetry-promote reschedule';
+        RETURN;
+    END IF;
+
     IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'telemetry-promote') THEN
         PERFORM cron.unschedule('telemetry-promote');
     END IF;
@@ -29,8 +39,7 @@ BEGIN
         );
         $job$
     );
-END;
-$$;
+END $outer$;
 
 -- Normalize JWT signatures as base64url without padding before compare.
 CREATE OR REPLACE FUNCTION set_tenant_from_jwt(

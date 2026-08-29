@@ -88,6 +88,21 @@ export async function login(email: string, password: string) {
   return data as { ok: boolean };
 }
 
+// Customer sign-in using email + hardware key (issued at subscription time).
+export async function customerLogin(email: string, hardwareKey: string) {
+  const res = await fetch("/api/auth/customer/login", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ email, hardware_key: hardwareKey }),
+  });
+  const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+  if (!res.ok) {
+    throw new Error(data.error || `Sign in failed (${res.status})`);
+  }
+  return data as { ok: boolean };
+}
+
 export function getAuditLog(limit = 100) {
   const q = Math.min(500, Math.max(1, limit));
   return request<{ events: unknown[]; limit: number }>(`/api/admin/audit-log?limit=${q}`);

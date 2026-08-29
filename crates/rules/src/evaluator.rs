@@ -37,6 +37,11 @@ const REGEX_DFA_SIZE_LIMIT: usize = 2_000_000;
 /// Patterns longer than this are rejected outright to prevent amplification.
 const MAX_PATTERN_LEN: usize = 1024;
 
+/// Maximum input string length evaluated by a regex at runtime.
+/// Inputs longer than this are treated as a match (fail-closed) to prevent
+/// resource exhaustion on attacker-controlled payloads.
+const MAX_REGEX_INPUT_LEN: usize = 100_000;
+
 fn regex_cache() -> &'static Mutex<HashMap<String, Regex>> {
     REGEX_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -163,16 +168,31 @@ fn eval_condition(cond: &Condition, ctx: &EvalContext) -> bool {
                     _ => unreachable!(),
                 }
             }
-            Op::Regex => match get_or_compile_regex(rule_val) {
-                Some(re) => re.is_match(ctx_val),
-                None => {
+            Op::Regex => {
+                // Safety: fail-closed. If the regex cannot be compiled/retrieved,
+                // or the input is too long to safely evaluate, treat it as a match
+                // so that Deny/Flag rules fire instead of silently allowing.
+                if ctx_val.len() > MAX_REGEX_INPUT_LEN {
                     tracing::warn!(
-                        pattern = rule_val,
-                        "invalid regex pattern in rule condition"
+                        field = cond.field,
+                        input_len = ctx_val.len(),
+                        max = MAX_REGEX_INPUT_LEN,
+                        "regex input exceeds maximum length — treating as match"
                     );
-                    false
+                    return true;
                 }
-            },
+                match get_or_compile_regex(rule_val) {
+                    Some(re) => re.is_match(ctx_val),
+                    None => {
+                        tracing::error!(
+                            pattern = rule_val,
+                            field = cond.field,
+                            "regex unavailable at evaluation time despite load-time validation — treating as match"
+                        );
+                        true
+                    }
+                }
+            }
         };
     }
     false
@@ -299,15 +319,14 @@ impl RuleEvaluator {
 
         // Pre-validate and cache all regex patterns
         for rule in &active {
-            if rule.condition.op == Op::Regex {
-                if let Some(pattern) = rule.condition.value.as_str() {
-                    if get_or_compile_regex(pattern).is_none() {
-                        return Err(EvalError::InvalidRegex {
-                            rule: rule.id.clone(),
-                            pattern: pattern.to_string(),
-                        });
-                    }
-                }
+            if rule.condition.op == Op::Regex
+                && let Some(pattern) = rule.condition.value.as_str()
+                && get_or_compile_regex(pattern).is_none()
+            {
+                return Err(EvalError::InvalidRegex {
+                    rule: rule.id.clone(),
+                    pattern: pattern.to_string(),
+                });
             }
         }
 
@@ -329,43 +348,43 @@ impl RuleEvaluator {
     /// `delegation_depth` exceeds it, the request is denied immediately.
     pub fn evaluate(&self, ctx: &EvalContext) -> (EvalDecision, Vec<RuleOutput>) {
         // ── Global delegation depth check ──
-        if let Some(max) = self.max_delegation_depth {
-            if ctx.delegation_depth > max {
-                let msg = format!(
-                    "Delegation chain depth {} exceeds max allowed {}",
-                    ctx.delegation_depth, max
-                );
-                if self.shadow {
-                    let output = RuleOutput {
-                        rule_id: "__delegation_depth".to_string(),
-                        matched: true,
-                        action: RuleAction::Deny,
-                        message: Some(format!("[SHADOW] {msg}")),
-                        shadow_downgraded: true,
-                    };
-                    // In shadow mode, continue evaluation with a flag instead
-                    return (
-                        EvalDecision::FlaggedAllow {
-                            flags: vec!["__delegation_depth".to_string()],
-                        },
-                        vec![output],
-                    );
-                }
+        if let Some(max) = self.max_delegation_depth
+            && ctx.delegation_depth > max
+        {
+            let msg = format!(
+                "Delegation chain depth {} exceeds max allowed {}",
+                ctx.delegation_depth, max
+            );
+            if self.shadow {
                 let output = RuleOutput {
                     rule_id: "__delegation_depth".to_string(),
                     matched: true,
                     action: RuleAction::Deny,
-                    message: Some(msg.clone()),
-                    shadow_downgraded: false,
+                    message: Some(format!("[SHADOW] {msg}")),
+                    shadow_downgraded: true,
                 };
+                // In shadow mode, continue evaluation with a flag instead
                 return (
-                    EvalDecision::Deny {
-                        rule_id: "__delegation_depth".to_string(),
-                        message: msg,
+                    EvalDecision::FlaggedAllow {
+                        flags: vec!["__delegation_depth".to_string()],
                     },
                     vec![output],
                 );
             }
+            let output = RuleOutput {
+                rule_id: "__delegation_depth".to_string(),
+                matched: true,
+                action: RuleAction::Deny,
+                message: Some(msg.clone()),
+                shadow_downgraded: false,
+            };
+            return (
+                EvalDecision::Deny {
+                    rule_id: "__delegation_depth".to_string(),
+                    message: msg,
+                },
+                vec![output],
+            );
         }
 
         let mut outputs: Vec<RuleOutput> = Vec::new();
@@ -423,13 +442,12 @@ impl RuleEvaluator {
                 }
             }
 
-            if !matched
+            if (!matched
                 || (!self.shadow
-                    || !matches!(rule.action, RuleAction::Deny | RuleAction::CircuitBreak))
+                    || !matches!(rule.action, RuleAction::Deny | RuleAction::CircuitBreak)))
+                && outputs.last().is_none_or(|o| o.rule_id != rule.id)
             {
-                if !outputs.last().map_or(false, |o| o.rule_id == rule.id) {
-                    outputs.push(output);
-                }
+                outputs.push(output);
             }
         }
 
@@ -787,6 +805,53 @@ mod tests {
         ctx.agent_id = "test_agent".into();
         let (dec, _) = ev.evaluate(&ctx);
         assert!(matches!(dec, EvalDecision::FlaggedAllow { flags } if flags.len() == 2));
+    }
+
+    #[test]
+    fn regex_too_long_input_fails_closed() {
+        // A Deny rule that does not match on a normal input should match
+        // when the input exceeds the runtime length limit, causing a deny.
+        let rules = vec![make_rule(
+            "short_input_only",
+            Priority::Safety,
+            "recipient",
+            Op::Regex,
+            FieldValue::Text(r"^short$".into()),
+            RuleAction::Deny,
+            vec![],
+        )];
+        let ev = RuleEvaluator::new(&pf(rules)).unwrap();
+
+        let mut ctx = default_ctx();
+        ctx.recipient = "a".repeat(MAX_REGEX_INPUT_LEN + 1);
+        let (dec, _) = ev.evaluate(&ctx);
+        assert!(
+            matches!(dec, EvalDecision::Deny { rule_id, .. } if rule_id == "short_input_only"),
+            "over-long regex input must fail closed"
+        );
+    }
+
+    #[test]
+    fn regex_too_long_input_flag_action_also_matches() {
+        // Same fail-closed behavior for Flag rules.
+        let rules = vec![make_rule(
+            "flag_long_input",
+            Priority::Safety,
+            "recipient",
+            Op::Regex,
+            FieldValue::Text(r"^short$".into()),
+            RuleAction::Flag,
+            vec![],
+        )];
+        let ev = RuleEvaluator::new(&pf(rules)).unwrap();
+
+        let mut ctx = default_ctx();
+        ctx.recipient = "a".repeat(MAX_REGEX_INPUT_LEN + 1);
+        let (dec, _) = ev.evaluate(&ctx);
+        assert!(
+            matches!(dec, EvalDecision::FlaggedAllow { flags } if flags.contains(&"flag_long_input".to_string())),
+            "over-long regex input must flag when rule action is Flag"
+        );
     }
 
     // ─── Shadow mode tests ────────────────────────────────────────────────────

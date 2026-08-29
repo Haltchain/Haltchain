@@ -429,7 +429,7 @@ mod tests {
 
         // Should be around 10 (1% of 1000)
         println!("Low risk sampled: {}/1000", sampled);
-        assert!(sampled >= 1 && sampled <= 50); // Wide tolerance for randomness
+        assert!((1..=50).contains(&sampled)); // Wide tolerance for randomness
     }
 
     #[test]

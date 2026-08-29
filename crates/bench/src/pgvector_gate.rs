@@ -244,10 +244,8 @@ fn percentile(sorted: &[u64], p: f64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::percentile;
-
     #[test]
     fn percentile_handles_empty() {
-        assert_eq!(percentile(&[], 0.99), 0);
+        assert_eq!(super::percentile(&[], 0.99), 0);
     }
 }

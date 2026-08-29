@@ -68,6 +68,20 @@ pub struct DbStore {
     telemetry_hot_writer: TelemetryHotWriter,
 }
 
+/// Postgres serialization_failure. SERIALIZABLE transactions are allowed to
+/// abort with this under concurrency; the caller is expected to retry.
+fn is_serialization_failure(e: &DbError) -> bool {
+    match e {
+        DbError::Sqlx(sqlx::Error::Database(db)) => {
+            matches!(db.code().as_deref(), Some("40001") | Some("40P01"))
+        }
+        _ => false,
+    }
+}
+
+/// Number of attempts for SERIALIZABLE writes before giving up.
+const SERIALIZABLE_MAX_ATTEMPTS: u32 = 5;
+
 pub struct DecisionRecord {
     pub transaction_id: Uuid,
     pub org_id: Option<Uuid>,
@@ -327,7 +341,29 @@ impl DbStore {
         Ok(())
     }
 
+    /// Insert a hash-chained decision, retrying if the SERIALIZABLE transaction
+    /// aborts because a concurrent insert touched the same chain tip.
     pub async fn insert_decision(&self, r: &DecisionRecord) -> Result<i64, DbError> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.insert_decision_once(r).await {
+                Ok(id) => return Ok(id),
+                Err(e) if is_serialization_failure(&e) && attempt < SERIALIZABLE_MAX_ATTEMPTS => {
+                    tracing::debug!(
+                        attempt,
+                        txn = %r.transaction_id,
+                        "decision insert hit serialization failure; retrying"
+                    );
+                    // brief backoff so the competing writer can commit first
+                    tokio::time::sleep(std::time::Duration::from_millis(5 * attempt as u64)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn insert_decision_once(&self, r: &DecisionRecord) -> Result<i64, DbError> {
         Self::ensure_write_org_id(r.org_id)?;
         let write_org_id = Self::normalize_write_org_id(r.org_id);
         // ── Postgres append-only hash chaining (Section C) ────────────────────
@@ -419,6 +455,29 @@ impl DbStore {
 
     /// Same hash-chained decision insert as [`Self::insert_decision`], plus drift row in one SERIALIZABLE tx (Roadmap E).
     pub async fn insert_decision_with_drift(
+        &self,
+        r: &DecisionRecord,
+        drift: &DriftLogRecord,
+    ) -> Result<i64, DbError> {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            match self.insert_decision_with_drift_once(r, drift).await {
+                Ok(id) => return Ok(id),
+                Err(e) if is_serialization_failure(&e) && attempt < SERIALIZABLE_MAX_ATTEMPTS => {
+                    tracing::debug!(
+                        attempt,
+                        txn = %r.transaction_id,
+                        "decision+drift insert hit serialization failure; retrying"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(5 * attempt as u64)).await;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    }
+
+    async fn insert_decision_with_drift_once(
         &self,
         r: &DecisionRecord,
         drift: &DriftLogRecord,
@@ -1355,9 +1414,50 @@ impl DbStore {
 
     // ── Full-Text Search on Audit Decisions ───────────────────────────────────
 
-    /// Full-text search over `decisions_hot` using TSVector index.
-    /// `query` is a plain-text string; converted to tsquery via plainto_tsquery.
-    /// Returns up to `limit` results ordered by recency.
+    /// Tenant-scoped FTS using the `audit_fts_search()` SQL function (migration 015).
+    /// Sets `app.current_org_id` on a dedicated connection so RLS applies, returns
+    /// ts_rank-scored results, then resets tenant context before returning the connection.
+    pub async fn search_audit_decisions_scoped(
+        &self,
+        org_id: Uuid,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<AuditSearchResult>, DbError> {
+        use sqlx::Row;
+        let mut conn = self.pool.acquire().await?;
+        sqlx::query("SELECT set_config('app.current_org_id', $1, false)")
+            .bind(org_id.to_string())
+            .execute(&mut *conn)
+            .await?;
+        let rows = sqlx::query(
+            r#"SELECT id, transaction_id, agent_id, decision, reason, policy_code, decided_at
+               FROM audit_fts_search($1, $2)"#,
+        )
+        .bind(query)
+        .bind(limit as i32)
+        .fetch_all(&mut *conn)
+        .await?;
+        sqlx::query("SELECT reset_tenant_context()")
+            .execute(&mut *conn)
+            .await
+            .ok();
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            out.push(AuditSearchResult {
+                id: row.get("id"),
+                transaction_id: row.get("transaction_id"),
+                agent_id: row.get("agent_id"),
+                decision: row.get("decision"),
+                reason: row.get("reason"),
+                policy_code: row.get("policy_code"),
+                decided_at: row.get("decided_at"),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Unscoped FTS — no tenant filtering. Only for internal/admin use; do NOT expose
+    /// directly to multi-tenant API callers. Prefer `search_audit_decisions_scoped`.
     pub async fn search_audit_decisions(
         &self,
         query: &str,

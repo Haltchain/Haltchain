@@ -68,13 +68,13 @@ fn resolve_worker_bin() -> Result<PathBuf, String> {
     if let Ok(p) = std::env::var("HALTCHAIN_MODEL_WORKER_BIN") {
         return Ok(PathBuf::from(p));
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for name in ["haltchain-model-worker", "haltchain_model_worker"] {
-                let c = dir.join(name);
-                if c.exists() {
-                    return Ok(c);
-                }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        for name in ["haltchain-model-worker", "haltchain_model_worker"] {
+            let c = dir.join(name);
+            if c.exists() {
+                return Ok(c);
             }
         }
     }

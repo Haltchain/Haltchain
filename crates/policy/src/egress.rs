@@ -29,16 +29,16 @@ impl CircuitBreaker for EgressBreaker {
             .max_egress_bytes_per_minute
             .unwrap_or(self.max_bytes_per_minute);
 
-        if let Some(bytes) = ctx.egress_bytes {
-            if bytes > limit {
-                return PolicyResult::Deny {
-                    reason: format!(
-                        "Egress volume {} bytes exceeds limit {} bytes/min",
-                        bytes, limit
-                    ),
-                    policy: "EGRESS_VOLUME_EXCEEDED",
-                };
-            }
+        if let Some(bytes) = ctx.egress_bytes
+            && bytes > limit
+        {
+            return PolicyResult::Deny {
+                reason: format!(
+                    "Egress volume {} bytes exceeds limit {} bytes/min",
+                    bytes, limit
+                ),
+                policy: "EGRESS_VOLUME_EXCEEDED",
+            };
         }
         PolicyResult::Pass
     }

@@ -294,10 +294,10 @@ impl OnnxModel {
             .unwrap_or_default();
 
         // Insert into cache with LRU eviction
-        if self.cache_order.len() >= EMBED_CACHE_CAPACITY {
-            if let Some(old_key) = self.cache_order.pop_front() {
-                self.cache.remove(&old_key);
-            }
+        if self.cache_order.len() >= EMBED_CACHE_CAPACITY
+            && let Some(old_key) = self.cache_order.pop_front()
+        {
+            self.cache.remove(&old_key);
         }
         self.cache.insert(key, embedding.clone());
         self.cache_order.push_back(key);
@@ -334,16 +334,16 @@ impl OnnxModel {
 
         // Run inference only on cache misses
         if !miss_texts.is_empty() {
-            let miss_refs: Vec<&str> = miss_texts.iter().map(|s| *s).collect();
+            let miss_refs: Vec<&str> = miss_texts.clone();
             let computed = self.embed_batch_uncached(&miss_refs);
             for (j, embedding) in computed.into_iter().enumerate() {
                 let idx = miss_indices[j];
                 let key = Self::hash_text(texts[idx]);
                 // Cache the result
-                if self.cache_order.len() >= EMBED_CACHE_CAPACITY {
-                    if let Some(old_key) = self.cache_order.pop_front() {
-                        self.cache.remove(&old_key);
-                    }
+                if self.cache_order.len() >= EMBED_CACHE_CAPACITY
+                    && let Some(old_key) = self.cache_order.pop_front()
+                {
+                    self.cache.remove(&old_key);
                 }
                 self.cache.insert(key, embedding.clone());
                 self.cache_order.push_back(key);
@@ -429,7 +429,7 @@ impl OnnxModel {
         )
         .and_then(|a| {
             Value::from_array(a)
-                .map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported).into())
+                .map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported))
         }) {
             Ok(v) => v,
             Err(_) => {
@@ -444,7 +444,7 @@ impl OnnxModel {
         )
         .and_then(|a| {
             Value::from_array(a)
-                .map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported).into())
+                .map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported))
         }) {
             Ok(v) => v,
             Err(_) => {
@@ -459,7 +459,7 @@ impl OnnxModel {
         )
         .and_then(|a| {
             Value::from_array(a)
-                .map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported).into())
+                .map_err(|_| ndarray::ShapeError::from_kind(ndarray::ErrorKind::Unsupported))
         }) {
             Ok(v) => v,
             Err(_) => {
@@ -514,16 +514,14 @@ impl OnnxModel {
         let seq_len = shape_vec[1];
         let hidden = shape_vec[2];
 
-        let token_embeddings = match Array2::from_shape_vec(
-            (batch * seq_len, hidden),
-            output_data.iter().cloned().collect(),
-        ) {
-            Ok(t) => t,
-            Err(_) => {
-                tracing::error!(batch, seq_len, hidden, "ONNX output shape mismatch");
-                return texts.iter().map(|_| vec![0.0; self.dims]).collect();
-            }
-        };
+        let token_embeddings =
+            match Array2::from_shape_vec((batch * seq_len, hidden), output_data.to_vec()) {
+                Ok(t) => t,
+                Err(_) => {
+                    tracing::error!(batch, seq_len, hidden, "ONNX output shape mismatch");
+                    return texts.iter().map(|_| vec![0.0; self.dims]).collect();
+                }
+            };
 
         // Mean pooling with attention mask
         let mut embeddings = Vec::with_capacity(batch_size);

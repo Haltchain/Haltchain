@@ -62,6 +62,7 @@ const BENIGN_TRACES: &[&str] = &[
 // TEST: DEEP SCAN MUST CATCH ALL INJECTIONS
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn deep_scan_catches_all_injections() {
     let monitor = CognitiveMonitor::new();
@@ -114,6 +115,7 @@ fn deep_scan_catches_all_injections() {
 // TEST: FALSE POSITIVE RATE MUST BE <5%
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn deep_scan_false_positive_rate_under_5_percent() {
     let monitor = CognitiveMonitor::new();
@@ -162,6 +164,7 @@ fn deep_scan_false_positive_rate_under_5_percent() {
 // TEST: PARAPHRASE DETECTION
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn paraphrase_detection_required() {
     let monitor = CognitiveMonitor::new();
@@ -218,6 +221,7 @@ fn paraphrase_detection_required() {
 // TEST: TRIAGE MUST CATCH OBVIOUS CASES
 // ─────────────────────────────────────────────────────────────────────────────
 
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn triage_catches_suspicious_keywords() {
     let monitor = CognitiveMonitor::new();
@@ -242,6 +246,7 @@ fn triage_catches_suspicious_keywords() {
     }
 }
 
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn triage_does_not_flag_benign_text() {
     let monitor = CognitiveMonitor::new();

@@ -17,17 +17,21 @@
 //!   - [ ] io_uring hot path migration (see io_uring module)
 //!   - [ ] Seccomp-BPF dynamic profile generation from observed syscall set
 
-pub mod probe_manager;
 pub mod io_uring;
+pub mod probe_manager;
 pub mod seccomp_gen;
 
-pub use probe_manager::{ProbeManager, ProbeConfig, ProbeEvent};
+pub use probe_manager::{ProbeConfig, ProbeEvent, ProbeManager};
 
 /// Build info string for health/status endpoints.
 pub fn build_info() -> String {
     format!(
         "haltchain-ebpf/{} phase=phase2 kernel_feature={}",
         env!("CARGO_PKG_VERSION"),
-        if cfg!(feature = "kernel") { "enabled" } else { "disabled" }
+        if cfg!(feature = "kernel") {
+            "enabled"
+        } else {
+            "disabled"
+        }
     )
 }

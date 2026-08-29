@@ -360,18 +360,18 @@ async fn killswitch_byzantine_one_third_bft_resistance() {
 
     // Neither node should grant the vote — stale term must be rejected.
     let granted_by_1 = actions1.iter().any(|a| {
-        if let haltchain_consensus::raft::RaftAction::Send { to: _, msg } = a {
-            if let RaftMessage::VoteResp(r) = msg {
-                return r.vote_granted;
-            }
+        if let haltchain_consensus::raft::RaftAction::Send { to: _, msg } = a
+            && let RaftMessage::VoteResp(r) = msg
+        {
+            return r.vote_granted;
         }
         false
     });
     let granted_by_2 = actions2.iter().any(|a| {
-        if let haltchain_consensus::raft::RaftAction::Send { to: _, msg } = a {
-            if let RaftMessage::VoteResp(r) = msg {
-                return r.vote_granted;
-            }
+        if let haltchain_consensus::raft::RaftAction::Send { to: _, msg } = a
+            && let RaftMessage::VoteResp(r) = msg
+        {
+            return r.vote_granted;
         }
         false
     });

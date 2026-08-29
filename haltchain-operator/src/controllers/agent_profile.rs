@@ -9,7 +9,7 @@ use anyhow::Result;
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
-    Resource, ResourceExt,
+    ResourceExt,
     api::{Api, ListParams, Patch, PatchParams},
     client::Client,
     runtime::{

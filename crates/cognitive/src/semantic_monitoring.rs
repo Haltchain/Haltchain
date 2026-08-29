@@ -142,14 +142,14 @@ impl HnswIndex {
                     node_id: current.node_id,
                     distance: current_dist,
                 });
-            } else if let Some(worst) = results.peek() {
-                if current_dist < worst.distance {
-                    results.pop();
-                    results.push(SearchNode {
-                        node_id: current.node_id,
-                        distance: current_dist,
-                    });
-                }
+            } else if let Some(worst) = results.peek()
+                && current_dist < worst.distance
+            {
+                results.pop();
+                results.push(SearchNode {
+                    node_id: current.node_id,
+                    distance: current_dist,
+                });
             }
 
             // Explore neighbors
@@ -531,12 +531,7 @@ mod tests {
 
     fn create_test_embeddings(n: usize, dim: usize) -> Vec<Array1<f32>> {
         (0..n)
-            .map(|i| {
-                Array1::from_iter((0..dim).map(|j| {
-                    let x = (i as f32 * 0.1 + j as f32 * 0.01).sin();
-                    x
-                }))
-            })
+            .map(|i| Array1::from_iter((0..dim).map(|j| (i as f32 * 0.1 + j as f32 * 0.01).sin())))
             .collect()
     }
 
@@ -611,10 +606,7 @@ mod tests {
         // Create reference embeddings - normal distribution around 0
         let normal_embeddings: Vec<Array1<f32>> = (0..100)
             .map(|i| {
-                Array1::from_iter((0..32).map(|j| {
-                    let val = ((i * 7 + j * 3) % 100) as f32 / 100.0 - 0.5; // Range [-0.5, 0.5]
-                    val
-                }))
+                Array1::from_iter((0..32).map(|j| ((i * 7 + j * 3) % 100) as f32 / 100.0 - 0.5)) // Range [-0.5, 0.5]
             })
             .collect();
 

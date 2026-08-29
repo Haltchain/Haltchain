@@ -48,7 +48,7 @@ pub async fn run() -> Result<()> {
     loop {
         let (stream, remote_addr) = listener.accept().await?;
         let acceptor = acceptor.clone();
-        let mut svc = app.clone();
+        let svc = app.clone();
 
         tokio::spawn(async move {
             match acceptor.accept(stream).await {

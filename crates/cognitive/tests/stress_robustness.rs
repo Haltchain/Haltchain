@@ -374,6 +374,7 @@ fn held_out_benign_corpus() -> Vec<&'static str> {
     ]
 }
 
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn stress_test_onnx_paraphrase_robustness() {
     // RH-04 & RH-05 FIX: Use real ONNX detector with true adversarial paraphrases
@@ -445,6 +446,7 @@ fn stress_test_onnx_paraphrase_robustness() {
     );
 }
 
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn stress_test_onnx_false_positive_rate() {
     let detector = OnnxDetector::new();
@@ -500,6 +502,7 @@ fn stress_test_onnx_false_positive_rate() {
     );
 }
 
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn stress_test_onnx_context_camouflage() {
     let detector = OnnxDetector::new();
@@ -569,6 +572,7 @@ fn stress_test_onnx_context_camouflage() {
     );
 }
 
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn stress_test_onnx_calibration_stability() {
     // RH-10 FIX: Test that calibration stability PRESERVES DETECTION QUALITY
@@ -696,6 +700,7 @@ fn stress_test_onnx_calibration_stability() {
     println!("RH-10: Calibration stable - detection quality preserved over 7 days.");
 }
 
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn stress_test_onnx_context_classification() {
     let detector = OnnxDetector::new();
@@ -781,6 +786,7 @@ fn stress_test_onnx_context_classification() {
     );
 }
 
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn stress_test_calibration_pipeline() {
     // Test the full calibration pipeline
@@ -807,6 +813,7 @@ fn stress_test_calibration_pipeline() {
     println!("Stats: {:?}", stats);
 }
 
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn rh_c02_attack_anchors_retained_after_calibration() {
     // RH-C02: Attack anchor embeddings must survive calibration cycles.
@@ -848,6 +855,7 @@ fn rh_c02_attack_anchors_retained_after_calibration() {
     println!("RH-C02: Attack anchor retention verified across calibration cycle.");
 }
 
+#[ignore = "requires HALTCHAIN_MODEL_DIR with ONNX weights"]
 #[test]
 fn rh_c04_calibration_percentiles_monotone_across_drift() {
     // RH-C04: p95 <= p99 <= p995 must hold after every drift iteration.

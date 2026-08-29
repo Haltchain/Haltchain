@@ -2,6 +2,9 @@
 name    = "haltchain-anchor"
 version = "0.1.0"
 edition = "2024"
+description = "Anchoring and notarization primitives for HaltChain decisions"
+license = "MIT"
+repository = "https://github.com/Haltchain/HaltChain"
 
 [features]
 l2 = []

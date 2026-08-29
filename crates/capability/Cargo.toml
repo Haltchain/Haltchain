@@ -2,6 +2,9 @@
 name = "haltchain-capability"
 version = "0.1.0"
 edition = "2024"
+description = "Capability trajectory and domain risk evaluation"
+license = "MIT"
+repository = "https://github.com/Haltchain/HaltChain"
 
 [dependencies]
 haltchain-embeddings = { path = "../embeddings" }

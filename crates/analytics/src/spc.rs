@@ -102,12 +102,7 @@ impl SpcMonitor {
     pub fn calculate_psi(&self, current: &Distribution, expected: &Distribution) -> PsiResult {
         let mut psi = 0.0f32;
 
-        for (_i, (curr, exp)) in current
-            .bins()
-            .iter()
-            .zip(expected.bins().iter())
-            .enumerate()
-        {
+        for (curr, exp) in current.bins().iter().zip(expected.bins().iter()) {
             // Avoid division by zero and log(0)
             let exp_safe = exp.max(1e-10);
             let curr_safe = curr.max(1e-10);
@@ -115,7 +110,7 @@ impl SpcMonitor {
             if *exp > 0.0 && *curr > 0.0 {
                 // PSI formula: sum((Actual - Expected) * ln(Actual / Expected))
                 let contribution = (curr_safe - exp_safe) * (curr_safe / exp_safe).ln();
-                psi += contribution as f32;
+                psi += contribution;
             }
         }
 
@@ -229,7 +224,7 @@ impl SpcMonitor {
             }
         }
 
-        (2.0 * sum).min(1.0).max(0.0)
+        (2.0 * sum).clamp(0.0, 1.0)
     }
 }
 

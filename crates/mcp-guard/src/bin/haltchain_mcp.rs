@@ -6,10 +6,10 @@ use std::process;
 use std::sync::Arc;
 
 use axum::{
+    Json, Router,
     extract::State,
     http::StatusCode,
     routing::{get, post},
-    Json, Router,
 };
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
@@ -156,7 +156,9 @@ fn scan_config(path: &PathBuf, baseline_path: &Option<PathBuf>, verbose: bool) -
         }
     };
 
-    let servers = wrapper.mcp_servers.as_ref()
+    let servers = wrapper
+        .mcp_servers
+        .as_ref()
         .or(wrapper.mcp_servers_camel.as_ref())
         .cloned()
         .unwrap_or_default();
@@ -174,21 +176,21 @@ fn scan_config(path: &PathBuf, baseline_path: &Option<PathBuf>, verbose: bool) -
         }
 
         // Check if server has command-based execution
-        if let Some(cmd) = server_config.get("command") {
-            if let Some(cmd_str) = cmd.as_str() {
-                for pattern in BLOCKED_PATTERNS {
-                    if cmd_str.to_lowercase().contains(&pattern.to_lowercase()) {
-                        issues.push(ScanIssue {
-                            server: server_name.clone(),
-                            severity: "CRITICAL".to_string(),
-                            category: "command_injection".to_string(),
-                            message: format!(
-                                "Server command contains blocked pattern '{}': {}",
-                                pattern, cmd_str
-                            ),
-                            tool_name: None,
-                        });
-                    }
+        if let Some(cmd) = server_config.get("command")
+            && let Some(cmd_str) = cmd.as_str()
+        {
+            for pattern in BLOCKED_PATTERNS {
+                if cmd_str.to_lowercase().contains(&pattern.to_lowercase()) {
+                    issues.push(ScanIssue {
+                        server: server_name.clone(),
+                        severity: "CRITICAL".to_string(),
+                        category: "command_injection".to_string(),
+                        message: format!(
+                            "Server command contains blocked pattern '{}': {}",
+                            pattern, cmd_str
+                        ),
+                        tool_name: None,
+                    });
                 }
             }
         }
@@ -219,59 +221,55 @@ fn scan_config(path: &PathBuf, baseline_path: &Option<PathBuf>, verbose: bool) -
         if let Some(env) = server_config.get("env").and_then(|e| e.as_object()) {
             for (key, value) in env {
                 let key_lower = key.to_lowercase();
-                if key_lower.contains("secret")
+                if (key_lower.contains("secret")
                     || key_lower.contains("password")
                     || key_lower.contains("token")
                     || key_lower.contains("api_key")
-                    || key_lower.contains("private_key")
+                    || key_lower.contains("private_key"))
+                    && let Some(val_str) = value.as_str()
+                    && !val_str.starts_with("$")
+                    && !val_str.starts_with("${")
                 {
-                    if let Some(val_str) = value.as_str() {
-                        if !val_str.starts_with("$") && !val_str.starts_with("${") {
-                            issues.push(ScanIssue {
-                                server: server_name.clone(),
-                                severity: "HIGH".to_string(),
-                                category: "credential_exposure".to_string(),
-                                message: format!(
-                                    "Potential hardcoded credential in env var '{}'",
-                                    key
-                                ),
-                                tool_name: None,
-                            });
-                        }
-                    }
+                    issues.push(ScanIssue {
+                        server: server_name.clone(),
+                        severity: "HIGH".to_string(),
+                        category: "credential_exposure".to_string(),
+                        message: format!("Potential hardcoded credential in env var '{}'", key),
+                        tool_name: None,
+                    });
                 }
             }
         }
 
         // Check if tool is in baseline (if baseline provided)
-        if let Some(ref bl) = baseline {
-            if !bl.is_tool_approved(server_name) {
-                issues.push(ScanIssue {
-                    server: server_name.clone(),
-                    severity: "MEDIUM".to_string(),
-                    category: "baseline_violation".to_string(),
-                    message: format!(
-                        "Server '{}' not found in baseline inventory — unknown tool",
-                        server_name
-                    ),
-                    tool_name: None,
-                });
-            }
+        if let Some(ref bl) = baseline
+            && !bl.is_tool_approved(server_name)
+        {
+            issues.push(ScanIssue {
+                server: server_name.clone(),
+                severity: "MEDIUM".to_string(),
+                category: "baseline_violation".to_string(),
+                message: format!(
+                    "Server '{}' not found in baseline inventory — unknown tool",
+                    server_name
+                ),
+                tool_name: None,
+            });
         }
 
         // Check for network access patterns
         if let Some(args) = server_config.get("args").and_then(|a| a.as_array()) {
             for arg in args {
-                if let Some(arg_str) = arg.as_str() {
-                    if arg_str.starts_with("http://") || arg_str.starts_with("https://") {
-                        issues.push(ScanIssue {
-                            server: server_name.clone(),
-                            severity: "LOW".to_string(),
-                            category: "network_access".to_string(),
-                            message: format!("Server connects to external URL: {}", arg_str),
-                            tool_name: None,
-                        });
-                    }
+                if let Some(arg_str) = arg.as_str()
+                    && (arg_str.starts_with("http://") || arg_str.starts_with("https://"))
+                {
+                    issues.push(ScanIssue {
+                        server: server_name.clone(),
+                        severity: "LOW".to_string(),
+                        category: "network_access".to_string(),
+                        message: format!("Server connects to external URL: {}", arg_str),
+                        tool_name: None,
+                    });
                 }
             }
         }
@@ -281,9 +279,8 @@ fn scan_config(path: &PathBuf, baseline_path: &Option<PathBuf>, verbose: bool) -
     let high_count = issues.iter().filter(|i| i.severity == "HIGH").count();
     let medium_count = issues.iter().filter(|i| i.severity == "MEDIUM").count();
 
-    let risk_score = (critical_count as f64 * 10.0)
-        + (high_count as f64 * 5.0)
-        + (medium_count as f64 * 2.0);
+    let risk_score =
+        (critical_count as f64 * 10.0) + (high_count as f64 * 5.0) + (medium_count as f64 * 2.0);
 
     let verdict = if critical_count > 0 {
         "BLOCKED — critical security issues found"
@@ -341,31 +338,25 @@ fn check_tool(
 
     for pattern in BLOCKED_PATTERNS {
         if tool_name.to_lowercase().contains(&pattern.to_lowercase()) {
-            issues.push(format!(
-                "Tool name contains blocked pattern '{}'",
-                pattern
-            ));
+            issues.push(format!("Tool name contains blocked pattern '{}'", pattern));
         }
         if args_json.to_lowercase().contains(&pattern.to_lowercase()) {
-            issues.push(format!(
-                "Tool args contain blocked pattern '{}'",
-                pattern
-            ));
+            issues.push(format!("Tool args contain blocked pattern '{}'", pattern));
         }
     }
 
     if let Some(bl_path) = baseline_path {
-        let content = fs::read_to_string(bl_path)
-            .map_err(|e| format!("Failed to read baseline: {}", e))?;
+        let content =
+            fs::read_to_string(bl_path).map_err(|e| format!("Failed to read baseline: {}", e))?;
         let baseline: BaselineInventory = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse baseline: {}", e))?;
 
         if !baseline.is_tool_approved(tool_name) {
-            issues.push(format!(
-                "Tool '{}' not in baseline inventory",
-                tool_name
-            ));
+            issues.push(format!("Tool '{}' not in baseline inventory", tool_name));
         }
+    } else if !is_fail_open() {
+        // No baseline and not explicitly fail-open: block unknown tools
+        issues.push("no-baseline-configured".to_string());
     }
 
     if issues.is_empty() {
@@ -383,6 +374,12 @@ fn check_tool(
         }))
         .unwrap())
     }
+}
+
+fn is_fail_open() -> bool {
+    std::env::var("HALTCHAIN_LITE_FAIL_OPEN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Deserialize)]
@@ -431,7 +428,8 @@ async fn run_serve(port: u16, baseline: Option<PathBuf>) -> Result<(), Box<dyn s
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    println!("haltchain-mcp listening on http://{addr}");
+    let bound = listener.local_addr().unwrap_or(addr);
+    println!("haltchain-mcp listening on http://{bound}");
     println!("GET  /health");
     println!("POST /check  {{\"tool\":\"...\",\"args\":\"{{}}\"}}");
     axum::serve(listener, app).await?;
@@ -440,10 +438,7 @@ async fn run_serve(port: u16, baseline: Option<PathBuf>) -> Result<(), Box<dyn s
 
 fn print_scan_result(result: &ScanResult, format: &str) {
     if format == "json" {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(result).unwrap()
-        );
+        println!("{}", serde_json::to_string_pretty(result).unwrap());
         return;
     }
 
@@ -520,20 +515,18 @@ async fn main() {
             agent_id: _,
             org_id: _,
             baseline,
-        } => {
-            match check_tool(&tool, &args, &baseline) {
-                Ok(result) => {
-                    println!("{}", result);
-                    let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
-                    if parsed["decision"] == "block" {
-                        process::exit(1);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Error: {}", e);
+        } => match check_tool(&tool, &args, &baseline) {
+            Ok(result) => {
+                println!("{}", result);
+                let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+                if parsed["decision"] == "block" {
                     process::exit(1);
                 }
             }
-        }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                process::exit(1);
+            }
+        },
     }
 }

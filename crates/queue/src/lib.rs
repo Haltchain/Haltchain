@@ -16,17 +16,12 @@ pub use redis_queue::RedisScanQueue;
 
 pub type QueueId = Uuid;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum QueuePriority {
     High,
+    #[default]
     Normal,
     Low,
-}
-
-impl Default for QueuePriority {
-    fn default() -> Self {
-        Self::Normal
-    }
 }
 
 fn default_max_attempts() -> u8 {

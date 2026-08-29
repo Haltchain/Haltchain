@@ -1,0 +1,5 @@
+{
+  "approved_tools": ["read_file", "list_dir", "search", "grep"],
+  "orgs": {},
+  "agents": {}
+}
