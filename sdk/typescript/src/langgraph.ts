@@ -169,6 +169,40 @@ export class HaltChainGuard {
 
 // ── Structured diff helpers ───────────────────────────────────────────────────
 
+/** Prefix for snapshots stored on LangGraph state between checkpoint nodes. */
+const INTERNAL_PREFIX = "__haltchain_pre_";
+
+/** Drop checkpoint bookkeeping so it cannot dominate the policy diff. */
+function withoutInternalKeys(state: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(state)) {
+    if (k.startsWith(INTERNAL_PREFIX)) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+function asStateRecord(value: unknown): Record<string, unknown> {
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    return value as Record<string, unknown>;
+  }
+  if (value === undefined || value === null) return {};
+  return { value };
+}
+
+/** Copy state so a later in-place mutation cannot rewrite the stored baseline. */
+function cloneSnapshot(state: Record<string, unknown>): Record<string, unknown> {
+  const clean = withoutInternalKeys(state);
+  if (typeof structuredClone === "function") {
+    try {
+      return structuredClone(clean);
+    } catch {
+      // Non-cloneable values fall through to JSON.
+    }
+  }
+  return JSON.parse(JSON.stringify(clean)) as Record<string, unknown>;
+}
+
 /** Flatten an object to leaf `"key.path": value` pairs for diff computation. */
 function flattenState(obj: Record<string, unknown>, prefix = ""): Record<string, unknown> {
   const out: Record<string, unknown> = {};
@@ -265,18 +299,22 @@ export class HaltCheckpointer {
     stateAfter: Record<string, unknown>,
     nodeName: string,
   ): Promise<ValidationResponse> {
-    const traceId = (stateAfter[this.traceIdKey] ?? stateBefore[this.traceIdKey]) as string | undefined;
-    const sessionId = (stateAfter[this.sessionKey] ?? stateBefore[this.sessionKey]) as string | undefined;
+    const before = withoutInternalKeys(stateBefore);
+    const after = withoutInternalKeys(stateAfter);
+    const traceId = (after[this.traceIdKey] ?? before[this.traceIdKey]) as string | undefined;
+    const sessionId = (after[this.sessionKey] ?? before[this.sessionKey]) as string | undefined;
 
-    const flatBefore = flattenState(stateBefore);
-    const flatAfter = flattenState(stateAfter);
-    const diff = stateDiff(flatBefore, flatAfter).slice(0, this.maxDiffEntries);
+    const flatBefore = flattenState(before);
+    const flatAfter = flattenState(after);
+    const changes = stateDiff(flatBefore, flatAfter);
+    const diff = changes.slice(0, this.maxDiffEntries);
 
     const action: Record<string, unknown> = {
       type: `checkpoint:${nodeName}`,
-      // Surface tool calls in the diff so YAML rules can inspect them
+      // Surface tool calls in the diff so YAML rules can inspect them.
+      // `diff_count` is the full change set; `changed_keys` / `diff_sample` are capped.
       changed_keys: diff.map((d) => d.key),
-      diff_count: diff.length,
+      diff_count: changes.length,
       diff_sample: diff.slice(0, 10),
     };
 
@@ -286,10 +324,11 @@ export class HaltCheckpointer {
 
     const result = await this.client.check(action, { sessionId, context: metadata });
 
-    if (
-      this.blockOnDeny &&
-      (result.decision === "DENY" || result.decision === "CIRCUIT_BREAK")
-    ) {
+    // ALLOW and goal-clarification are the only decisions that may continue.
+    // Missing or unexpected decisions fail closed.
+    const mayContinue =
+      result.decision === "ALLOW" || result.decision === "GOAL_CLARIFICATION_REQUIRED";
+    if (this.blockOnDeny && !mayContinue) {
       throw new Error(
         `HaltCheckpointer blocked at node '${nodeName}': ${result.reason ?? result.decision}`,
       );
@@ -308,20 +347,21 @@ export class HaltCheckpointer {
     nodeName = "haltchain_checkpoint",
   ): (state: Record<string, unknown>) => Promise<Record<string, unknown>> {
     return async (state: Record<string, unknown>) => {
-      // The "before" snapshot is the state arriving at this node.
-      // The "after" snapshot is the state produced by the previous node (same object here;
-      // real diff is captured between this node's input and the *next* node's input).
-      //
-      // Since LangGraph passes immutable state objects, we treat the incoming state
-      // as the post-transition snapshot and compare against the stored pre-snapshot.
-      const preKey = `__haltchain_pre_${nodeName}`;
-      const prevSnapshot = state[preKey] as Record<string, unknown> | undefined;
-      const preSnapshot = prevSnapshot ?? {};
+      // LangGraph merges the partial return into channel state. The incoming
+      // object is the post-transition snapshot; the value under `preKey` is the
+      // previous boundary. Internal keys are omitted from the policy diff and
+      // from the stored baseline so they cannot grow without bound.
+      const preKey = `${INTERNAL_PREFIX}${nodeName}`;
+      const prev = state[preKey];
+      const preSnapshot =
+        prev !== null && typeof prev === "object" && !Array.isArray(prev)
+          ? (prev as Record<string, unknown>)
+          : {};
+      const current = withoutInternalKeys(state);
 
-      await this.checkTransition(preSnapshot, state, nodeName);
+      await this.checkTransition(preSnapshot, current, nodeName);
 
-      // Store current state as the baseline for the next checkpoint boundary.
-      return { [preKey]: { ...state } };
+      return { [preKey]: cloneSnapshot(current) };
     };
   }
 
@@ -335,13 +375,13 @@ export class HaltCheckpointer {
     const originalInvoke = graph.invoke.bind(graph);
 
     const wrappedInvoke = async (...args: unknown[]): Promise<unknown> => {
-      const input = (args[0] ?? {}) as Record<string, unknown>;
-      const preSnapshot = flattenState(input);
+      const input = asStateRecord(args[0]);
+      const output = await originalInvoke(...args);
 
-      const output = (await originalInvoke(...args)) as Record<string, unknown>;
-
-      // Validate the full graph transition (input → output)
-      await self.checkTransition(preSnapshot, flattenState(output), "graph_invoke");
+      // Pass raw state. checkTransition flattens and reads session/trace ids
+      // itself; pre-flattening hides top-level ids that live beside nested objects
+      // only after a second flatten, and drops non-object graph results.
+      await self.checkTransition(input, asStateRecord(output), "graph_invoke");
 
       return output;
     };

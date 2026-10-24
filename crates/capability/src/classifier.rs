@@ -1,7 +1,7 @@
 use crate::domain::{Domain, danger_anchors};
 use crate::trajectory::{CapabilityEntry, TrajectoryStore};
 use chrono::Utc;
-use haltchain_embeddings::{LocalModel, cosine_similarity};
+use haltchain_embeddings::{ModelKind, cosine_similarity, select_local_embedding_kind};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -29,7 +29,7 @@ pub enum CapabilityRisk {
 }
 
 pub struct CapabilityClassifier {
-    model: LocalModel,
+    model: ModelKind,
     store: Arc<TrajectoryStore>,
     // Per-domain individual anchor embeddings (not centroid); key = "{:?}" of Domain
     anchor_embeddings: RwLock<HashMap<String, Vec<Vec<f64>>>>,
@@ -38,7 +38,10 @@ pub struct CapabilityClassifier {
 impl CapabilityClassifier {
     pub fn new(store: Arc<TrajectoryStore>) -> Self {
         let c = Self {
-            model: LocalModel::default(),
+            // Honor HALTCHAIN_EMBEDDING_MODE / TIER. LocalModel::default() panics
+            // when the ONNX weights are absent, which took down the API even in
+            // hybrid mode where a hash fallback is allowed.
+            model: select_local_embedding_kind(),
             store,
             anchor_embeddings: RwLock::new(HashMap::new()),
         };
