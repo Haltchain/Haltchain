@@ -320,11 +320,10 @@ impl TendermintBridge {
                 });
             }
 
-            // Multi-validator deployment: each validator runs identical
-            // deterministic logic, so the local decision projects 1:1 onto
-            // what the other validators will decide.  Record the local vote
-            // once — the Raft/consensus transport layer is responsible for
-            // collecting the remaining votes before commit.
+            // Record only this node's vote. Peer votes are not applied here, and a
+            // single vote cannot meet the 2-of-3 threshold. Pending must not commit:
+            // treating Allow+Pending as success fakes quorum the readiness gate above
+            // just refused to fake for an undersized cluster.
             let mut tracker = QuorumTracker::new(&resp.transaction_id);
             let vote = if resp.decision == Decision::Allow {
                 Vote::Approve
@@ -333,12 +332,31 @@ impl TendermintBridge {
             };
             tracker.vote(self.local_node_id(), vote);
             let quorum = tracker.decision();
-            let code = match (&resp.decision, &quorum) {
-                (_, QuorumDecision::Rejected) | (_, QuorumDecision::Unavailable) => 10,
-                (Decision::Allow, _) => 0,
-                (Decision::Deny, _) => 1,
-                (Decision::CircuitBreak, _) => 2,
-                (Decision::GoalClarificationRequired, _) => 3,
+            if !matches!(quorum, QuorumDecision::Approved) {
+                return Ok(DeliverTxResponse {
+                    code: 10,
+                    log: format!(
+                        "quorum not reached ({quorum:?}); refusing to commit high-stakes tx on a single local vote"
+                    ),
+                    data: serde_json::json!({
+                        "decision": "DENY",
+                        "transaction_id": resp.transaction_id,
+                        "timestamp": resp.timestamp,
+                        "policy": resp.policy,
+                        "reason": "high-stakes quorum not reached",
+                        "local_decision": resp.decision.as_str(),
+                        "sig": resp.sig,
+                        "app_time": Utc::now().to_rfc3339(),
+                        "quorum": format!("{:?}", quorum),
+                        "quorum_enforced": true,
+                    }),
+                });
+            }
+            let code = match resp.decision {
+                Decision::Allow => 0,
+                Decision::Deny => 1,
+                Decision::CircuitBreak => 2,
+                Decision::GoalClarificationRequired => 3,
             };
             Ok(DeliverTxResponse {
                 code,
@@ -553,6 +571,93 @@ mod tests {
         assert!(
             !report.ready,
             "2 validators in one region must fail rollout gate"
+        );
+    }
+
+    fn ready_three_validator_config() -> TendermintBridgeConfig {
+        TendermintBridgeConfig {
+            chain_id: "haltchain-test".to_string(),
+            app_version: "0.1.0".to_string(),
+            validators: vec![
+                TendermintValidator {
+                    node_id: "n1".to_string(),
+                    address: "10.0.0.1:26656".to_string(),
+                    region: "us-east-1".to_string(),
+                },
+                TendermintValidator {
+                    node_id: "n2".to_string(),
+                    address: "10.0.0.2:26656".to_string(),
+                    region: "us-west-2".to_string(),
+                },
+                TendermintValidator {
+                    node_id: "n3".to_string(),
+                    address: "10.0.0.3:26656".to_string(),
+                    region: "us-east-1".to_string(),
+                },
+            ],
+        }
+    }
+
+    #[tokio::test]
+    async fn high_stakes_deliver_does_not_commit_on_single_local_vote() {
+        let bridge = TendermintBridge::new(AppState::new(), ready_three_validator_config());
+        assert!(bridge.bft_readiness_report().ready);
+        // $600.00 is above HIGH_STAKES_THRESHOLD_CENTS ($500.00).
+        let tx = serde_json::json!({
+            "agent_id": "tm-agent",
+            "action": {
+                "type": "transfer",
+                "amount": 600.0,
+                "currency": "USD",
+                "recipient": "acct-test"
+            },
+            "metadata": {}
+        })
+        .to_string()
+        .into_bytes();
+        let resp = bridge
+            .deliver_tx(&tx)
+            .await
+            .expect("deliver_tx should return a response");
+        assert_eq!(
+            resp.code, 10,
+            "a single local vote must not commit a high-stakes transaction, got {}",
+            resp.log
+        );
+        assert_eq!(resp.data["quorum_enforced"], true);
+        assert_eq!(resp.data["decision"], "DENY");
+        assert!(
+            resp.data["quorum"]
+                .as_str()
+                .unwrap_or("")
+                .contains("Pending"),
+            "expected Pending quorum, got {}",
+            resp.data["quorum"]
+        );
+    }
+
+    #[tokio::test]
+    async fn low_stakes_deliver_skips_quorum_gate() {
+        let bridge = TendermintBridge::new(AppState::new(), ready_three_validator_config());
+        let tx = serde_json::json!({
+            "agent_id": "tm-agent",
+            "action": {
+                "type": "transfer",
+                "amount": 10.0,
+                "currency": "USD",
+                "recipient": "acct-test"
+            },
+            "metadata": {}
+        })
+        .to_string()
+        .into_bytes();
+        let resp = bridge
+            .deliver_tx(&tx)
+            .await
+            .expect("deliver_tx should return a response");
+        assert_ne!(
+            resp.data["quorum_enforced"], true,
+            "amounts under the high-stakes threshold must not take the quorum path"
         );
     }
 

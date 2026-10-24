@@ -11,11 +11,15 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs",
       "types": "./dist/index.d.ts"
+    },
+    "./langgraph": {
+      "import": "./dist/langgraph.js",
+      "types": "./dist/langgraph.d.ts"
     }
   },
   "scripts": {
     "build": "tsc",
-    "test": "node --experimental-vm-modules node_modules/.bin/jest"
+    "test": "tsc && node --test test/checkpoint.test.mjs"
   },
   "devDependencies": {
     "typescript": "^5.4.0",

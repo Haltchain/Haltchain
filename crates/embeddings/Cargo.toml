@@ -20,10 +20,14 @@ async-trait = { workspace = true }
 uuid        = { workspace = true }
 reqwest     = { workspace = true }
 
-# ONNX Runtime for semantic embeddings
-# TODO: upgrade to ort 2.0 stable once released (currently rc.5).
+# ONNX Runtime for semantic embeddings.
+# Pinned to rc.13. A caret on a pre-release floats to later rcs: rc.14 made
+# SessionBuilder::new require an Environment, which this loader does not pass.
+# rc.13 also pins ort-sys exactly, so the build script stays reproducible
+# without a workspace Cargo.lock (the lockfile is gitignored).
+# TODO: upgrade to ort 2.0 stable once released.
 # Track: https://github.com/pykeio/ort/releases
-ort = "2.0.0-rc.5"
+ort = "=2.0.0-rc.13"
 ndarray = "0.17"
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 dirs = "5"
